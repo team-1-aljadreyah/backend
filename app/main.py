@@ -181,14 +181,29 @@ async def init_default_data():
             logger.info("Default seed data initialized successfully.")
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logging()
-    logger.info(f"Starting {settings.APP_NAME} in {settings.APP_ENV} mode...")
-    await init_default_data()
+
+    logger.info(
+        f"Starting {settings.APP_NAME} "
+        f"in {settings.APP_ENV} mode..."
+    )
+
+    if settings.APP_ENV.lower() in {"development", "testing"}:
+        await init_default_data()
+    else:
+        logger.info(
+            "Production mode: automatic schema creation "
+            "and demo seeding are disabled."
+        )
+
     yield
+
     logger.info("Shutting down application...")
     await engine.dispose()
+
 
 
 app = FastAPI(
