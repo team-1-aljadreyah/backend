@@ -1,7 +1,15 @@
+
 from datetime import datetime, timezone
-from fastapi import APIRouter
+
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core.config import settings
 from app.core.logging import logger
+from app.database.connection import engine
+
+
 router = APIRouter(tags=["Health"])
 
 
@@ -14,12 +22,6 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-from fastapi import HTTPException
-
-from app.database.connection import engine
-
 
 @router.get("/health/ready")
 async def readiness_check():
@@ -29,17 +31,16 @@ async def readiness_check():
 
         return {
             "status": "ready",
-            "database": "connected"
+            "database": "connected",
         }
 
-except SQLAlchemyError as exc:
+    except SQLAlchemyError as exc:
+        logger.error(
+            "Readiness check failed: database connection error (%s)",
+            type(exc).__name__,
+        )
 
-    logger.error(
-        "Readiness check failed: database connection error (%s)",
-        type(exc).__name__
-    )
-
-    raise HTTPException(
-        status_code=503,
-        detail="Database is unavailable"
-    ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Database is unavailable",
+        ) from exc
