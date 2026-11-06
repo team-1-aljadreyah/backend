@@ -184,135 +184,215 @@ pipeline {
         // 5. DEPLOY PRODUCTION
         // =====================================
 
-        stage('Deploy Production') {
+        
+stage('Deploy Production') {
 
-            steps {
+    steps {
 
-                sh '''
-                    set -Eeuo pipefail
+        sh '''
 
-                    # Copy Compose configuration to a stable server path
-                    install -m 0644 \
-                        "$WORKSPACE/compose.production.yaml" \
-                        "$COMPOSE_FILE"
+            set -Eeuo pipefail
 
-                    cd "$DEPLOY_DIR"
+            echo "======================================"
+            echo "STARTING PRODUCTION DEPLOYMENT"
+            echo "======================================"
 
-                    # Identify current running image
-                    PREVIOUS_IMAGE="$(
-                        docker inspect \
-                        --format '{{.Config.Image}}' \
-                        "$CONTAINER_NAME" 2>/dev/null || true
-                    )"
+            # 1. Copy production Compose configuration
 
-                    # Validate Compose configuration
-                    BACKEND_IMAGE="$NEW_IMAGE" docker compose \
+            install -m 0644 \
+                "$WORKSPACE/compose.production.yaml" \
+                "$COMPOSE_FILE"
+
+            cd "$DEPLOY_DIR"
+
+
+            # 2. Detect previous running image
+
+            PREVIOUS_IMAGE="$(
+                docker inspect \
+                    --format '{{.Config.Image}}' \
+                    "$CONTAINER_NAME" 2>/dev/null || true
+            )"
+
+            echo "Previous image: ${PREVIOUS_IMAGE:-NONE}"
+            echo "New image: $NEW_IMAGE"
+
+
+            # 3. Validate Docker Compose configuration
+
+            BACKEND_IMAGE="$NEW_IMAGE" docker compose \
+                -p "$COMPOSE_PROJECT" \
+                -f "$COMPOSE_FILE" \
+                config --quiet
+
+
+            # 4. Rollback function
+
+            rollback() {
+
+                echo "======================================"
+                echo "STARTING ROLLBACK"
+                echo "======================================"
+
+                if [ -n "$PREVIOUS_IMAGE" ]; then
+
+                    echo "Restoring previous image: $PREVIOUS_IMAGE"
+
+                    BACKEND_IMAGE="$PREVIOUS_IMAGE" docker compose \
                         -p "$COMPOSE_PROJECT" \
                         -f "$COMPOSE_FILE" \
-                        config --quiet
+                        up -d --no-deps --force-recreate backend || {
 
-                    # Rollback function
-                    rollback() {
+                            echo "WARNING: Previous image restoration failed."
+                            return 1
+                        }
 
-                        echo "Deployment failed. Restoring previous image."
+                else
 
-                        if [ -n "$PREVIOUS_IMAGE" ]; then
+                    echo "No previous image exists."
+                    echo "Removing failed deployment container."
 
-                            BACKEND_IMAGE="$PREVIOUS_IMAGE" docker compose \
-                                -p "$COMPOSE_PROJECT" \
-                                -f "$COMPOSE_FILE" \
-                                up -d --no-deps --force-recreate backend
+                    docker rm -f "$CONTAINER_NAME" \
+                        >/dev/null 2>&1 || true
 
-                        else
+                fi
 
-                            docker compose \
-                                -p "$COMPOSE_PROJECT" \
-                                -f "$COMPOSE_FILE" \
-                                stop backend || true
-
-                            docker compose \
-                                -p "$COMPOSE_PROJECT" \
-                                -f "$COMPOSE_FILE" \
-                                rm -f backend || true
-
-                        fi
-                    }
-
-                    # Start new production container
-                    if ! BACKEND_IMAGE="$NEW_IMAGE" docker compose \
-                        -p "$COMPOSE_PROJECT" \
-                        -f "$COMPOSE_FILE" \
-                        up -d --no-deps --force-recreate backend; then
-
-                        rollback
-
-                        exit 1
-
-                    fi
-
-                    # Wait for Docker health status
-                    HEALTHY=0
-
-                    for attempt in $(seq 1 45); do
-
-                        STATUS="$(
-                            docker inspect \
-                            --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
-                            "$CONTAINER_NAME" 2>/dev/null || echo missing
-                        )"
-
-                        echo "Health check attempt $attempt: $STATUS"
-
-                        if [ "$STATUS" = "healthy" ]; then
-
-                            HEALTHY=1
-
-                            break
-
-                        fi
-
-                        if [ "$STATUS" = "unhealthy" ] || \
-                           [ "$STATUS" = "missing" ]; then
-
-                            break
-
-                        fi
-
-                        sleep 2
-
-                    done
-
-                    # Rollback if health check failed
-                    if [ "$HEALTHY" -ne 1 ]; then
-
-                        echo "New release failed health verification."
-
-                        rollback
-
-                        exit 1
-
-                    fi
-
-                    # Save active image for future Compose commands
-                    printf 'BACKEND_IMAGE=%s\\n' "$NEW_IMAGE" \
-                        > "$DEPLOY_DIR/.env.next"
-
-                    mv "$DEPLOY_DIR/.env.next" "$DEPLOY_DIR/.env"
-
-                    echo "======================================"
-
-                    echo "PRODUCTION DEPLOYMENT SUCCESSFUL"
-
-                    echo "IMAGE: $NEW_IMAGE"
-
-                    echo "CONTAINER: $CONTAINER_NAME"
-
-                    echo "PORT: 8000"
-
-                    echo "======================================"
-                '''
+                echo "Rollback procedure finished."
             }
-        }
+
+
+            # 5. Deploy new container
+
+            echo "Starting new production container..."
+
+            if ! BACKEND_IMAGE="$NEW_IMAGE" docker compose \
+                -p "$COMPOSE_PROJECT" \
+                -f "$COMPOSE_FILE" \
+                up -d --no-deps --force-recreate backend; then
+
+                echo "ERROR: Docker Compose deployment failed."
+
+                docker logs --tail 200 "$CONTAINER_NAME" || true
+
+                rollback || true
+
+                exit 1
+
+            fi
+
+
+            # 6. Wait for Docker Health Check
+
+            echo "Waiting for application readiness..."
+
+            HEALTHY=0
+
+            for attempt in $(seq 1 90); do
+
+                STATUS="$(
+                    docker inspect \
+                        --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
+                        "$CONTAINER_NAME" 2>/dev/null || echo missing
+                )"
+
+                STATE="$(
+                    docker inspect \
+                        --format '{{.State.Status}}' \
+                        "$CONTAINER_NAME" 2>/dev/null || echo missing
+                )"
+
+                echo "Health attempt $attempt/90: $STATUS | Container: $STATE"
+
+
+                if [ "$STATUS" = "healthy" ]; then
+
+                    HEALTHY=1
+
+                    echo "Application is healthy."
+
+                    break
+
+                fi
+
+
+                if [ "$STATUS" = "unhealthy" ] || \
+                   [ "$STATUS" = "missing" ] || \
+                   [ "$STATUS" = "no-healthcheck" ] || \
+                   [ "$STATE" = "exited" ] || \
+                   [ "$STATE" = "dead" ]; then
+
+                    echo "Application health verification failed."
+
+                    break
+
+                fi
+
+                sleep 2
+
+            done
+
+
+            # 7. Handle failed health verification
+
+            if [ "$HEALTHY" -ne 1 ]; then
+
+                echo "======================================"
+                echo "DEPLOYMENT HEALTH CHECK FAILED"
+                echo "======================================"
+
+                echo "Container state:"
+
+                docker inspect \
+                    --format '{{json .State}}' \
+                    "$CONTAINER_NAME" || true
+
+                echo "Health check details:"
+
+                docker inspect \
+                    --format '{{json .State.Health}}' \
+                    "$CONTAINER_NAME" || true
+
+                echo "Last 200 container log lines:"
+
+                docker logs --tail 200 "$CONTAINER_NAME" || true
+
+                rollback || true
+
+                exit 1
+
+            fi
+
+
+            # 8. Save successfully deployed image
+
+            echo "Saving active production image..."
+
+            umask 077
+
+            printf 'BACKEND_IMAGE=%s\n' "$NEW_IMAGE" \
+                > "$DEPLOY_DIR/.env.next"
+
+            mv "$DEPLOY_DIR/.env.next" "$DEPLOY_DIR/.env"
+
+
+            # 9. Deployment success
+
+            echo "======================================"
+            echo "PRODUCTION DEPLOYMENT SUCCESSFUL"
+            echo "======================================"
+
+            echo "IMAGE: $NEW_IMAGE"
+            echo "CONTAINER: $CONTAINER_NAME"
+            echo "PORT: 8000"
+            echo "HEALTH: HEALTHY"
+
+            echo "======================================"
+
+        '''
+
+    }
+
+}
 
     }
 
