@@ -1,0 +1,123 @@
+# =============================================================================
+# Al-Jadreyah Clinic Management System — Git Ignore Configuration
+# =============================================================================
+
+# --- Byte-compiled / optimized / DLL files ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- C extensions & build artifacts ---
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Environment Variables, Keys & Secrets ---
+# CRITICAL: Never commit credentials, connection strings, or private keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+secrets.json
+service_account*.json
+
+# --- Testing & Coverage ---
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+htmlcov/
+*.cover
+.hypothesis/
+
+# --- Linting & Type Checking ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# --- Local Databases & Ephemeral Storage ---
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+clinic.db
+clinic_production.db
+temp_test.db
+test_clinic.db
+test_suite*.db
+
+# --- Media & Uploads ---
+uploads/*
+!uploads/.gitkeep
+storage/*
+!storage/.gitkeep
+
+# --- Logging & Debugging ---
+*.log
+logs/
+*.pid
+debug.txt
+stress_test_report.json
+
+# --- Operating System & Editor Artifacts ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+
+# --- IDEs & Editors ---
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*~
+
+# --- Packaging & Dependency Caches ---
+.pip-cache/
+.uv/
+pip-log.txt
+pip-delete-this-directory.txt

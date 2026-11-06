@@ -1,0 +1,60 @@
+# =============================================================================
+# Al-Jadreyah Clinic Management System — Docker Build Exclusions
+# =============================================================================
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Sensitive files and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Local databases & uploads
+*.db
+*.sqlite
+*.sqlite3
+clinic_production.db
+uploads/*
+!uploads/.gitkeep
+
+# IDEs & local configurations
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Documentation and development scripts
+docs/
+tests/
+scripts/
+stress_test_report.json
+*.md
+!README.md

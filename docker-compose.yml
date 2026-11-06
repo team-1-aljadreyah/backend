@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: aljadreyah-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: aljadreyah_clinic
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aljadreyah_clinic"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aljadreyah-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_PORT: "8000"
+      APP_TIMEZONE: Asia/Baghdad
+      SECRET_KEY: change-me-in-production-random-secret-key-32chars
+      DATABASE_URL: postgresql+asyncpg://postgres:postgrespassword@db:5432/aljadreyah_clinic
+      SUPABASE_URL: https://mock-supabase.local
+      SUPABASE_ANON_KEY: mock-anon-key
+      SUPABASE_SERVICE_ROLE_KEY: mock-service-role-key
+      SUPABASE_STORAGE_BUCKET: lab-results
+      FRONTEND_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,https://alrahma.ama8.uk
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
