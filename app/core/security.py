@@ -50,6 +50,134 @@ def normalize_patient_name(name: str) -> str:
     return s
 
 
+def normalize_role(role: Optional[str]) -> Optional[str]:
+    """
+    Normalizes a role/job filter string into a standard Profile.role identifier.
+    Supports English and Arabic aliases, plurals, and phrases (e.g. 'doctors only', 'الأطباء فقط').
+    Returns None if 'all', empty, or indicating no filter.
+    """
+    if not role:
+        return None
+    r = role.strip().lower()
+    if not r:
+        return None
+
+    # Handle 'all' variants
+    if r in {
+        "all",
+        "all roles",
+        "all jobs",
+        "all_roles",
+        "all_jobs",
+        "allroles",
+        "none",
+        "any",
+        "الكل",
+        "كل",
+        "كل الوظائف",
+        "جميع الوظائف",
+        "كل الأدوار",
+        "جميع الأدوار",
+    }:
+        return None
+
+    valid_roles = {"patient", "reception", "doctor", "pharmacy", "manager", "lab", "accountant"}
+    if r in valid_roles:
+        return r
+
+    role_mappings = {
+        # Doctor
+        "doctors": "doctor",
+        "doctors only": "doctor",
+        "doctor only": "doctor",
+        "doctors_only": "doctor",
+        "dr": "doctor",
+        "physician": "doctor",
+        "physicians": "doctor",
+        "طبيب": "doctor",
+        "الأطباء": "doctor",
+        "الاطباء": "doctor",
+        "أطباء": "doctor",
+        "اطباء": "doctor",
+        "دكتور": "doctor",
+        "دكاترة": "doctor",
+        "الأطباء فقط": "doctor",
+        "طبيب فقط": "doctor",
+        # Reception
+        "receptionist": "reception",
+        "receptionists": "reception",
+        "reception only": "reception",
+        "frontdesk": "reception",
+        "front desk": "reception",
+        "استقبال": "reception",
+        "الاستقبال": "reception",
+        "موظف استقبال": "reception",
+        "موظفي الاستقبال": "reception",
+        # Manager
+        "managers": "manager",
+        "manager only": "manager",
+        "admin": "manager",
+        "admins": "manager",
+        "administrator": "manager",
+        "administrators": "manager",
+        "management": "manager",
+        "مدير": "manager",
+        "المدير": "manager",
+        "مدراء": "manager",
+        "إدارة": "manager",
+        "ادارة": "manager",
+        # Pharmacy
+        "pharmacist": "pharmacy",
+        "pharmacists": "pharmacy",
+        "pharmacy only": "pharmacy",
+        "pharmacist only": "pharmacy",
+        "صيدلية": "pharmacy",
+        "الصيدلية": "pharmacy",
+        "صيدلي": "pharmacy",
+        "صيادلة": "pharmacy",
+        # Lab
+        "labs": "lab",
+        "laboratory": "lab",
+        "laboratories": "lab",
+        "lab only": "lab",
+        "lab technician": "lab",
+        "lab technicians": "lab",
+        "مختبر": "lab",
+        "المختبر": "lab",
+        "تحاليل": "lab",
+        "فني مختبر": "lab",
+        # Accountant
+        "accountants": "accountant",
+        "accountant only": "accountant",
+        "accounting": "accountant",
+        "finance": "accountant",
+        "محاسب": "accountant",
+        "المحاسب": "accountant",
+        "محاسبين": "accountant",
+        "محاسبة": "accountant",
+        "مالية": "accountant",
+        # Patient
+        "patients": "patient",
+        "patient only": "patient",
+        "مريض": "patient",
+        "المريض": "patient",
+        "مرضى": "patient",
+    }
+
+    if r in role_mappings:
+        return role_mappings[r]
+
+    for key, role_val in role_mappings.items():
+        if key in r:
+            return role_val
+
+    for std_role in valid_roles:
+        if std_role in r:
+            return std_role
+
+    return r
+
+
 # ---------------------------------------------------------------------------
 # Arabic / English Three-Part Name Validation (First, Father, Grandfather)
 # ---------------------------------------------------------------------------

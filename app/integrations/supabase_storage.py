@@ -62,6 +62,23 @@ class SupabaseStorageClient:
         b64_content = base64.b64encode(content).decode("utf-8")
         return f"data:{content_type};base64,{b64_content}"
 
+    async def create_signed_url(self, file_name: str, expires_in: int = 315360000) -> Optional[str]:
+        if not self.enabled:
+            return None
+        url = f"{self.base_url}/storage/v1/object/sign/{self.bucket}/{file_name}"
+        headers = self._headers()
+        headers["Content-Type"] = "application/json"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(url, headers=headers, json={"expiresIn": expires_in})
+                if res.status_code == 200:
+                    signed_path = res.json().get("signedURL")
+                    return f"{self.base_url}/storage/v1{signed_path}"
+                logger.warning(f"Supabase create signed URL returned {res.status_code}: {res.text}")
+        except Exception as e:
+            logger.error(f"Supabase create signed URL error: {e}")
+        return None
+
     async def get_file_content(self, file_name: str) -> Optional[Tuple[bytes, str]]:
         if self.enabled:
             url = f"{self.base_url}/storage/v1/object/authenticated/{self.bucket}/{file_name}"

@@ -19,13 +19,17 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 def _welfare_to_schema(w: WelfareRequest) -> WelfareRequestSchema:
+    p_url = w.photo_url or ""
+    if p_url.startswith("/uploads/"):
+        p_url = f"https://api.ama8.uk{p_url}"
+
     return WelfareRequestSchema(
         id=w.id,
         patient_id=w.patient_id,
         patient_name=w.patient_name,
         patient_phone=w.patient_phone,
         card_number=w.card_number,
-        photo_url=w.photo_url,
+        photo_url=p_url,
         status=w.status,
         submitted_at=w.submitted_at.isoformat() if w.submitted_at else "",
         reviewed_by=w.reviewed_by,
@@ -141,7 +145,10 @@ async def submit_welfare(
         from app.integrations.supabase_storage import supabase_storage
         ct = photo.content_type or ("image/png" if ext == ".png" else "image/jpeg")
         storage_file = await supabase_storage.upload_file(unique_filename, content, ct)
-        if storage_file and not storage_file.startswith("data:"):
+        signed_url = await supabase_storage.create_signed_url(unique_filename)
+        if signed_url:
+            photo_url = signed_url
+        elif storage_file and not storage_file.startswith("data:"):
             photo_url = f"/storage/v1/object/authenticated/{supabase_storage.bucket}/{storage_file}"
     except Exception:
         pass

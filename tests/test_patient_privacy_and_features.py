@@ -111,6 +111,13 @@ class TestPatientPrivacyAndFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(file_open_logs), 0)
 
     async def test_users_list_paging_and_search(self):
+        # 0. Plain list (for Front api.listStaff)
+        res_plain = await self.client.get("/users", headers=self.manager_headers)
+        self.assertEqual(res_plain.status_code, 200)
+        users_arr = res_plain.json()["data"]
+        self.assertIsInstance(users_arr, list)
+        self.assertGreater(len(users_arr), 0)
+
         # 1. Paged list
         res_page = await self.client.get("/users?limit=3&offset=0", headers=self.manager_headers)
         self.assertEqual(res_page.status_code, 200)
@@ -132,6 +139,41 @@ class TestPatientPrivacyAndFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res_search_name.status_code, 200)
         data_n = res_search_name.json()["data"]
         self.assertGreater(len(data_n["items"]), 0)
+
+        # 4. Filter by role (exact: 'doctor')
+        res_role_doctor = await self.client.get("/users?role=doctor", headers=self.manager_headers)
+        self.assertEqual(res_role_doctor.status_code, 200)
+        data_doc = res_role_doctor.json()["data"]
+        self.assertIn("items", data_doc)
+        self.assertGreater(len(data_doc["items"]), 0)
+        self.assertTrue(all(u["role"] == "doctor" for u in data_doc["items"]))
+
+        # 5. Filter by job with phrase ('doctors only')
+        res_job_doc_phrase = await self.client.get("/users?job=doctors%20only", headers=self.manager_headers)
+        self.assertEqual(res_job_doc_phrase.status_code, 200)
+        data_phrase = res_job_doc_phrase.json()["data"]
+        self.assertGreater(len(data_phrase["items"]), 0)
+        self.assertTrue(all(u["role"] == "doctor" for u in data_phrase["items"]))
+
+        # 6. Filter by Arabic role ('الأطباء')
+        res_job_ar = await self.client.get("/users?role=الأطباء", headers=self.manager_headers)
+        self.assertEqual(res_job_ar.status_code, 200)
+        data_ar = res_job_ar.json()["data"]
+        self.assertGreater(len(data_ar["items"]), 0)
+        self.assertTrue(all(u["role"] == "doctor" for u in data_ar["items"]))
+
+        # 7. Combined role filter and search
+        res_comb = await self.client.get("/users?role=doctor&search=0780", headers=self.manager_headers)
+        self.assertEqual(res_comb.status_code, 200)
+        data_comb = res_comb.json()["data"]
+        self.assertTrue(all(u["role"] == "doctor" for u in data_comb["items"]))
+
+        # 8. All roles filter ('all')
+        res_all = await self.client.get("/users?role=all", headers=self.manager_headers)
+        self.assertEqual(res_all.status_code, 200)
+        data_all = res_all.json()["data"]
+        roles_present = {u["role"] for u in data_all["items"]}
+        self.assertGreater(len(roles_present), 1)
 
     async def test_doctor_schedule_custom_working_hours(self):
         # 1. Inspect existing schedules

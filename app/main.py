@@ -328,3 +328,27 @@ app.include_router(welfare.router)
 
 os.makedirs(os.path.join(os.getcwd(), "uploads"), exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+
+@app.get("/storage/v1/object/authenticated/{bucket}/{filename}")
+async def get_storage_file(bucket: str, filename: str):
+    from fastapi import Response, HTTPException
+    from app.integrations.supabase_storage import supabase_storage
+
+    # 1. Fetch from Supabase Storage
+    res = await supabase_storage.get_file_content(filename)
+    if res:
+        content, ct = res
+        return Response(content=content, media_type=ct)
+
+    # 2. Check local uploads directories
+    for sub in [bucket, "welfare", "lab-results"]:
+        p = os.path.join(os.getcwd(), "uploads", sub, filename)
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                content = f.read()
+            ext = os.path.splitext(filename)[1].lower()
+            ct = "image/png" if ext == ".png" else "application/pdf" if ext == ".pdf" else "image/jpeg"
+            return Response(content=content, media_type=ct)
+
+    raise HTTPException(status_code=404, detail="File not found")

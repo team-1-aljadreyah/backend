@@ -42,10 +42,17 @@ from app.core.security import (
 from app.services.audit_service import log_audit
 
 
-async def list_staff_users(db: AsyncSession, viewer: Profile) -> List[StaffUser]:
+async def list_staff_users(
+    db: AsyncSession,
+    viewer: Profile,
+    role: Optional[str] = None,
+) -> List[StaffUser]:
     stmt = select(Profile).order_by(Profile.id)
     if viewer.role != "manager":
         stmt = stmt.where(Profile.role != "patient")
+
+    if role:
+        stmt = stmt.where(Profile.role == role)
 
     users = (await db.execute(stmt)).scalars().all()
     return [
@@ -66,6 +73,7 @@ async def list_staff_users_paginated(
     limit: Optional[int] = None,
     offset: Optional[int] = 0,
     search: Optional[str] = None,
+    role: Optional[str] = None,
 ) -> Dict[str, Any]:
     stmt = select(Profile).order_by(Profile.id)
     count_stmt = select(func.count(Profile.id))
@@ -73,6 +81,9 @@ async def list_staff_users_paginated(
     filters = []
     if viewer.role != "manager":
         filters.append(Profile.role != "patient")
+
+    if role:
+        filters.append(Profile.role == role)
 
     if search and search.strip():
         s = search.strip()
