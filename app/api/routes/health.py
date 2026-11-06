@@ -13,3 +13,27 @@ async def health_check():
         "environment": settings.APP_ENV,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from fastapi import HTTPException
+
+from app.database.connection import engine
+
+
+@router.get("/health/ready")
+async def readiness_check():
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
+        return {
+            "status": "ready",
+            "database": "connected"
+        }
+
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is unavailable"
+        ) from exc
