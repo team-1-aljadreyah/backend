@@ -17,6 +17,8 @@ class DoctorSchema(BaseModel):
 class WorkDay(BaseModel):
     branch: BranchId
     shift: Shift
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 
 class DoctorDay(BaseModel):

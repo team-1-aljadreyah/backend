@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.connection import get_db
 from app.core.dependencies import require_role
@@ -12,11 +13,16 @@ router = APIRouter(prefix="/users", tags=["Staff Management"])
 
 @router.get("")
 async def list_staff(
+    limit: Optional[int] = Query(None),
+    offset: Optional[int] = Query(0),
+    search: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: Profile = Depends(require_role("reception", "manager")),
 ):
-    users = await admin_service.list_staff_users(db, user)
-    return success_response([u.model_dump() for u in users])
+    result = await admin_service.list_staff_users_paginated(
+        db, user, limit=limit, offset=offset, search=search
+    )
+    return success_response(result)
 
 
 @router.post("")

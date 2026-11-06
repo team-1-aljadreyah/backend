@@ -33,7 +33,12 @@ from app.schemas.admin import (
 )
 from app.schemas.service import ServiceSchema, ServiceInput
 from app.schemas.finance import CountRow
-from app.core.security import normalize_phone_local, get_password_hash
+from app.core.security import (
+    normalize_phone_local,
+    get_password_hash,
+    validate_three_part_name,
+    normalize_patient_name,
+)
 from app.services.audit_service import log_audit
 
 
@@ -55,9 +60,61 @@ async def list_staff_users(db: AsyncSession, viewer: Profile) -> List[StaffUser]
     ]
 
 
+async def list_staff_users_paginated(
+    db: AsyncSession,
+    viewer: Profile,
+    limit: Optional[int] = None,
+    offset: Optional[int] = 0,
+    search: Optional[str] = None,
+) -> Dict[str, Any]:
+    stmt = select(Profile).order_by(Profile.id)
+    count_stmt = select(func.count(Profile.id))
+
+    filters = []
+    if viewer.role != "manager":
+        filters.append(Profile.role != "patient")
+
+    if search and search.strip():
+        s = search.strip()
+        norm_phone = normalize_phone_local(s)
+        search_filter = or_(
+            Profile.name.ilike(f"%{s}%"),
+            Profile.phone.contains(s),
+        )
+        if norm_phone:
+            search_filter = or_(search_filter, Profile.phone.contains(norm_phone))
+        filters.append(search_filter)
+
+    if filters:
+        stmt = stmt.where(and_(*filters))
+        count_stmt = count_stmt.where(and_(*filters))
+
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    users = (await db.execute(stmt)).scalars().all()
+    items = [
+        StaffUser(
+            id=u.id,
+            name=u.name,
+            phone=u.phone,
+            role=u.role,
+            active=bool(u.is_active),
+        ).model_dump()
+        for u in users
+    ]
+    return {"items": items, "total": total}
+
+
 async def create_staff_user(db: AsyncSession, req: CreateStaffRequest, creator: Profile):
     if req.role in ("manager", "patient") and creator.role != "manager":
         raise ForbiddenException(message="Only managers can create manager or patient accounts", code="forbidden")
+
+    validate_three_part_name(req.name)
 
     phone = normalize_phone_local(req.phone)
     chk = select(Profile).where(Profile.phone == phone)
@@ -138,6 +195,7 @@ async def update_staff_user(db: AsyncSession, user_id: int, req: UpdateStaffRequ
         target.phone = norm_phone
 
     if req.name and req.name.strip():
+        validate_three_part_name(req.name)
         target.name = req.name.strip()
 
     if req.new_password:

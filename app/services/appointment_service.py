@@ -30,7 +30,7 @@ from app.schemas.doctor import DoctorSchema
 from app.schemas.finance import MoneySummary
 from app.services.audit_service import log_audit
 from app.core.idempotency import check_idempotency, save_idempotency_record
-from app.core.security import normalize_phone_local, normalize_patient_name
+from app.core.security import normalize_phone_local, normalize_patient_name, validate_three_part_name
 from app.services.patient_service import resolve_active_patient
 from app.services.notification_service import notify_patient
 from app.services.patient_service import compute_money_for_appointment
@@ -446,6 +446,8 @@ async def add_walk_in(db: AsyncSession, req: WalkInRequest, user: Profile) -> Wa
     cached = await check_idempotency(db, req.idempotency_key, "appointment.walk_in", req, user.id)
     if cached:
         return WalkInResult(**cached[1])
+
+    validate_three_part_name(req.name)
 
     norm_phone = normalize_phone_local(req.phone)
     norm_name = normalize_patient_name(req.name)

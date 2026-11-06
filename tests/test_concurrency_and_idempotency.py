@@ -101,14 +101,14 @@ class TestConcurrencyAndIdempotency(unittest.IsolatedAsyncioTestCase):
         # Create walk-in to get fresh appointment
         w_res = await self.client.post(
             "/walk-ins",
-            json={"name": "Idempotent Payer", "phone": "07700001122", "doctor_id": 1, "emergency": False},
+            json={"name": "Idempotent Payer One", "phone": "07700001122", "doctor_id": 1, "emergency": False},
             headers=self.reception_headers,
         )
         self.assertEqual(w_res.status_code, 200)
 
         # Get queue to find appt id
         q_res = await self.client.get("/doctors/1/queue", headers=self.reception_headers)
-        appt = next(a for a in q_res.json()["data"] if a["patient_name"] == "Idempotent Payer")
+        appt = next(a for a in q_res.json()["data"] if a["patient_name"] == "Idempotent Payer One")
         appt_id = appt["id"]
 
         idem_key = f"pay-idem-key-{appt_id}"

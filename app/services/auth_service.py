@@ -17,6 +17,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    validate_three_part_name,
 )
 from app.database.models.profile import Profile
 from app.database.models.patient import Patient
@@ -72,6 +73,7 @@ async def login(db: AsyncSession, req: LoginRequest) -> LoginResponse:
 
 
 async def register(db: AsyncSession, req: RegisterRequest) -> LoginResponse:
+    validate_three_part_name(req.name)
     phone = normalize_phone_local(req.phone)
     stmt = select(Profile).where(Profile.phone == phone)
     res = await db.execute(stmt)
@@ -213,7 +215,13 @@ async def forgot_password(db: AsyncSession, phone: str) -> Dict[str, Any]:
         "expires_at": time.time() + 600,
         "tries": 0,
     }
-    res["dev_code"] = code
+
+    # Dispatch real SMS via Supabase OTP if enabled
+    try:
+        await supabase_auth.send_phone_otp(norm_phone)
+    except Exception:
+        pass
+
     return res
 
 

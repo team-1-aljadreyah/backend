@@ -137,6 +137,14 @@ async def submit_welfare(
         f.write(content)
 
     photo_url = f"/uploads/welfare/{unique_filename}"
+    try:
+        from app.integrations.supabase_storage import supabase_storage
+        ct = photo.content_type or ("image/png" if ext == ".png" else "image/jpeg")
+        storage_file = await supabase_storage.upload_file(unique_filename, content, ct)
+        if storage_file and not storage_file.startswith("data:"):
+            photo_url = f"/storage/v1/object/authenticated/{supabase_storage.bucket}/{storage_file}"
+    except Exception:
+        pass
 
     # Check for existing pending request
     stmt_pending = select(WelfareRequest).where(

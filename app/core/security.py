@@ -50,6 +50,87 @@ def normalize_patient_name(name: str) -> str:
     return s
 
 
+# ---------------------------------------------------------------------------
+# Arabic / English Three-Part Name Validation (First, Father, Grandfather)
+# ---------------------------------------------------------------------------
+
+COMPOUND_PREFIXES = {
+    "عبد", "ابو", "أبو", "ابي", "أبي", "ابا", "أبا", "ام", "أم", "ابن", "ابنة", "بنت", "آل"
+}
+COMPOUND_SUFFIXES = {"الدين", "الله", "الاسلام", "الإسلام"}
+TITLES = {
+    "د.", "د/", "د", "دكتور", "دكتورة", "الدكتور", "الدكتورة",
+    "أ.", "أ/", "أستاذ", "أستاذة", "الأستاذ", "الأستاذة",
+    "م.", "مهندس", "مهندسة", "المهندس", "المهندسة",
+    "سيد", "سيدة", "السيد", "السيدة",
+    "شيخ", "شيخة", "الشيخ", "الشيخة",
+    "حاج", "حاجة", "الحاج", "الحاجة",
+    "dr.", "dr", "mr.", "mr", "mrs.", "mrs", "ms.", "ms"
+}
+
+
+def extract_name_parts(raw_name: str) -> list[str]:
+    """
+    Extracts name parts by stripping honorary titles and treating compound
+    prefixes (like 'عبد الكريم' or 'أبو بكر') and suffixes as a single part.
+    """
+    text = (raw_name or "").strip()
+    words = text.split()
+    if not words:
+        return []
+
+    # Strip leading titles
+    first_clean = words[0].rstrip(".").strip()
+    if words[0].lower() in TITLES or first_clean.lower() in TITLES:
+        words = words[1:]
+
+    merged = []
+    i = 0
+    while i < len(words):
+        w = words[i].strip()
+        if not w:
+            i += 1
+            continue
+
+        # Check prefix compounds (e.g. عبد الكريم, أبو بكر)
+        if w in COMPOUND_PREFIXES and i + 1 < len(words):
+            merged.append(f"{w} {words[i+1]}")
+            i += 2
+            continue
+
+        # Check suffix compounds (e.g. نور الدين, فضل الله)
+        if i + 1 < len(words) and words[i+1] in COMPOUND_SUFFIXES:
+            merged.append(f"{w} {words[i+1]}")
+            i += 2
+            continue
+
+        # Check common double names like 'محمد علي' when exactly 4 words remain
+        if w == "محمد" and i + 1 < len(words) and words[i+1] in {"علي", "حسن", "حسين", "باقر", "صادق", "مهدي", "رضا", "جواد", "كاظم", "أمين", "امين"}:
+            remaining_after_pair = len(words) - (i + 2)
+            if remaining_after_pair == 2:
+                merged.append(f"{w} {words[i+1]}")
+                i += 2
+                continue
+
+        merged.append(w)
+        i += 1
+    return merged
+
+
+def validate_three_part_name(name: str):
+    """
+    Validates that a name consists of exactly three parts (name, father, grandfather).
+    Rejects names that have fewer or more than 3 parts.
+    """
+    parts = extract_name_parts(name)
+    if len(parts) != 3:
+        from app.core.exceptions import UnprocessableEntityException
+        raise UnprocessableEntityException(
+            message="Name must be exactly three parts (name, father, grandfather)",
+            code="invalid_name",
+        )
+
+
 def normalize_phone_e164(phone: str) -> str:
     """
     Normalizes phone numbers to international E.164 format (+9647XXXXXXXXX).

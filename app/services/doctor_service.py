@@ -163,9 +163,14 @@ async def get_doctor_days(db: AsyncSession, doctor_id: int) -> List[DoctorDay]:
         w_idx = get_weekday_idx(cur_date)
         work_info = None
         if w_idx < len(doc_days) and doc_days[w_idx]:
+            d_item = doc_days[w_idx]
+            sh = d_item.get("shift", "morning")
+            sh_fallback = SHIFTS.get(sh, SHIFTS["morning"])
             work_info = WorkDay(
-                branch=doc_days[w_idx]["branch"],
-                shift=doc_days[w_idx]["shift"],
+                branch=d_item["branch"],
+                shift=d_item["shift"],
+                start=d_item.get("start") or sh_fallback["start"],
+                end=d_item.get("end") or sh_fallback["end"],
             )
 
         days_result.append(
@@ -228,8 +233,10 @@ async def get_doctor_slots(
         now_minutes = now_dt.hour * 60 + now_dt.minute
 
     slots = []
-    start_shift = to_minutes(shift_info["start"])
-    end_shift = to_minutes(shift_info["end"])
+    start_str = work_day.get("start") or shift_info["start"]
+    end_str = work_day.get("end") or shift_info["end"]
+    start_shift = to_minutes(start_str)
+    end_shift = to_minutes(end_str)
 
     curr = start_shift
     while curr + slot_len <= end_shift:
@@ -252,10 +259,21 @@ async def list_doctor_schedules(db: AsyncSession) -> List[DoctorSchedule]:
 
     schedules = []
     for doc in doctors:
-        days = [
-            WorkDay(branch=d["branch"], shift=d["shift"]) if d else None
-            for d in (doc.days or [])
-        ]
+        days = []
+        for d in (doc.days or []):
+            if not d:
+                days.append(None)
+            else:
+                sh = d.get("shift", "morning")
+                sh_fallback = SHIFTS.get(sh, SHIFTS["morning"])
+                days.append(
+                    WorkDay(
+                        branch=d["branch"],
+                        shift=d["shift"],
+                        start=d.get("start") or sh_fallback["start"],
+                        end=d.get("end") or sh_fallback["end"],
+                    )
+                )
         absences = [a for a in (doc.absences or []) if a >= today_str]
         late = None
         if doc.late_date == date.today() and doc.late_minutes > 0:

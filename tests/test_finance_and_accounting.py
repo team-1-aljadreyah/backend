@@ -17,7 +17,7 @@ class TestFinanceAndAccounting(unittest.IsolatedAsyncioTestCase):
         # 1. Create walk-in to get an appointment with fee
         w_res = await self.client.post(
             "/walk-ins",
-            json={"name": "Billing Patient", "phone": "07700112233", "doctor_id": 1, "emergency": False},
+            json={"name": "Billing Patient One", "phone": "07700112233", "doctor_id": 1, "emergency": False},
             headers=self.reception_headers,
         )
         self.assertEqual(w_res.status_code, 200)
@@ -26,7 +26,7 @@ class TestFinanceAndAccounting(unittest.IsolatedAsyncioTestCase):
         inv_res = await self.client.get("/invoices/today", headers=self.reception_headers)
         self.assertEqual(inv_res.status_code, 200)
         invoices = inv_res.json()["data"]
-        inv = next(i for i in invoices if i["patient_name"] == "Billing Patient")
+        inv = next(i for i in invoices if i["patient_name"] == "Billing Patient One")
         appt_id = inv["appointment_id"]
         rem_iqd = inv["money"]["balance"]["IQD"]
         self.assertEqual(rem_iqd, 25000.0)

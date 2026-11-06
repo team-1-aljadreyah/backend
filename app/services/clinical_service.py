@@ -35,8 +35,24 @@ from app.services.doctor_service import get_ticket_label
 
 
 async def require_doctor_sees_patient(db: AsyncSession, doctor_user: Profile, patient_id: int):
-    # Any authorized clinical staff member or doctor can review patient clinical records
-    if doctor_user.role in ("doctor", "manager", "reception"):
+    if doctor_user.role == "manager":
+        return
+    if doctor_user.role == "doctor":
+        if not doctor_user.doctor_id:
+            raise ForbiddenException(message="Doctor profile missing doctor_id", code="forbidden")
+        from sqlalchemy import func
+        doc_stmt = select(func.count(Appointment.id)).where(
+            Appointment.patient_id == patient_id,
+            Appointment.doctor_id == doctor_user.doctor_id,
+        )
+        has_appt = (await db.execute(doc_stmt)).scalar() or 0
+        if has_appt == 0:
+            raise ForbiddenException(
+                message="Doctor can only access records of patients who have or had an appointment with them",
+                code="forbidden",
+            )
+        return
+    if doctor_user.role == "reception":
         return
     raise ForbiddenException(message="Doctor does not have a clinical relationship with this patient", code="forbidden")
 
