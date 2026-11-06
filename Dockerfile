@@ -72,12 +72,4 @@ HEALTHCHECK \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)"]
 
 # Start FastAPI
-CMD [
-    "uvicorn",
-    "app.main:app",
-    "--host", "0.0.0.0",
-    "--port", "8000",
-    "--workers", "2",
-    "--proxy-headers",
-    "--forwarded-allow-ips", "*"
-]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "*"]
