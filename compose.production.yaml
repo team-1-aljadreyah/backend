@@ -1,0 +1,52 @@
+
+services:
+
+  backend:
+
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE must be set}
+
+    container_name: aljadreyah-backend
+
+    pull_policy: never
+
+    restart: unless-stopped
+
+    init: true
+
+    env_file:
+      - /etc/aljadreyah/backend.env
+
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8000"
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      - type: bind
+        source: /opt/aljadreyah/backend/shared/uploads
+        target: /app/uploads
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    pids_limit: 256
+
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
