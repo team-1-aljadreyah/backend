@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter
 from app.core.config import settings
-
+from app.core.logging import logger
 router = APIRouter(tags=["Health"])
 
 
@@ -32,8 +32,14 @@ async def readiness_check():
             "database": "connected"
         }
 
-    except SQLAlchemyError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Database is unavailable"
-        ) from exc
+except SQLAlchemyError as exc:
+
+    logger.error(
+        "Readiness check failed: database connection error (%s)",
+        type(exc).__name__
+    )
+
+    raise HTTPException(
+        status_code=503,
+        detail="Database is unavailable"
+    ) from exc
