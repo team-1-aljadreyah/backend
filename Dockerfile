@@ -63,13 +63,16 @@ USER 1001:1001
 
 EXPOSE 8000
 
+
 # Database-aware health check
+
 HEALTHCHECK \
-    --interval=30s \
+    --interval=10s \
     --timeout=5s \
-    --start-period=45s \
-    --retries=3 \
+    --start-period=60s \
+    --retries=6 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)"]
+
 
 # Start FastAPI
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "*"]
