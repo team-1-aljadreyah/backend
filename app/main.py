@@ -1,7 +1,7 @@
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-from fastapi import FastAPI, Request, status
+from typing import AsyncGenerator, Optional
+from fastapi import FastAPI, Request, Header, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,7 +48,9 @@ from app.api.routes import (
     audit,
     health,
     welfare,
+    realtime,
 )
+from app.services.realtime_service import realtime_manager
 
 
 async def init_default_data():
@@ -181,14 +183,32 @@ async def init_default_data():
             logger.info("Default seed data initialized successfully.")
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logging()
-    logger.info(f"Starting {settings.APP_NAME} in {settings.APP_ENV} mode...")
-    await init_default_data()
+
+    logger.info(
+        f"Starting {settings.APP_NAME} "
+        f"in {settings.APP_ENV} mode..."
+    )
+
+    if settings.APP_ENV.lower() in {"development", "testing"}:
+        await init_default_data()
+    else:
+        logger.info(
+            "Production mode: automatic schema creation "
+            "and demo seeding are disabled."
+        )
+
+    await realtime_manager.start_worker_engine()
+
     yield
+
     logger.info("Shutting down application...")
+    await realtime_manager.stop_worker_engine()
     await engine.dispose()
+
 
 
 app = FastAPI(
@@ -310,6 +330,93 @@ app.include_router(settings_route.router)
 app.include_router(services.router)
 app.include_router(audit.router)
 app.include_router(welfare.router)
+app.include_router(realtime.router)
 
-os.makedirs(os.path.join(os.getcwd(), "uploads"), exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# Secure File Access Routes (Replacing public static directory mount)
+@app.get("/storage/v1/object/authenticated/{bucket}/{filename}")
+async def get_storage_file(
+    bucket: str,
+    filename: str,
+    token: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
+):
+    from fastapi import Response, HTTPException
+    from sqlalchemy import select
+    from app.core.security import verify_file_download_token, decode_token
+    from app.integrations.supabase_storage import supabase_storage
+    from app.database.connection import AsyncSessionLocal
+    from app.database.models.patient import Patient, WelfareRequest
+    from app.database.models.visit import LabOrder
+
+    safe_filename = os.path.basename(filename)
+    if not safe_filename or safe_filename != filename or ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    user_info = None
+    if token:
+        user_info = verify_file_download_token(token=token, filename=safe_filename, bucket=bucket)
+
+    if not user_info and authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            payload = decode_token(parts[1])
+            if payload and payload.get("type") == "access":
+                user_info = {
+                    "user_id": int(payload.get("sub", 0)),
+                    "role": payload.get("role", "patient"),
+                }
+
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Authentication required to access protected files")
+
+    role = user_info.get("role", "patient")
+    user_id = user_info.get("user_id")
+
+    # Access control
+    if role not in ("manager", "accountant", "reception", "doctor", "lab", "welfare_viewer"):
+        if role == "patient" and user_id:
+            async with AsyncSessionLocal() as session:
+                if bucket == "welfare":
+                    stmt = select(WelfareRequest).join(Patient, WelfareRequest.patient_id == Patient.id).where(
+                        Patient.account_id == user_id,
+                        WelfareRequest.photo_url.contains(safe_filename),
+                    )
+                    res = await session.execute(stmt)
+                    if not res.scalar_one_or_none():
+                        raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this document")
+                elif bucket == "lab-results":
+                    stmt = select(LabOrder).join(Patient, LabOrder.patient_id == Patient.id).where(
+                        Patient.account_id == user_id,
+                        LabOrder.attachment_url.contains(safe_filename),
+                    )
+                    res = await session.execute(stmt)
+                    if not res.scalar_one_or_none():
+                        raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this document")
+                else:
+                    raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this document")
+        else:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this document")
+
+    res = await supabase_storage.get_file_content(safe_filename, bucket=bucket)
+    if res:
+        content, ct = res
+        return Response(
+            content=content,
+            media_type=ct,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, max-age=300",
+            },
+        )
+
+    raise HTTPException(status_code=404, detail="File not found")
+
+
+@app.get("/files/{bucket}/{filename}")
+async def get_secure_file(
+    bucket: str,
+    filename: str,
+    token: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
+):
+    return await get_storage_file(bucket, filename, token, authorization)

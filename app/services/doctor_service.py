@@ -18,6 +18,7 @@ from app.schemas.doctor import (
 )
 from app.services.audit_service import log_audit
 from app.services.notification_service import notify_patient
+from app.services.realtime_service import record_outbox_event
 
 SHIFTS = {
     "morning": {"start": "09:00", "end": "13:00"},
@@ -81,6 +82,25 @@ async def get_queue_screen(db: AsyncSession) -> List[ScreenDoctor]:
     all_doctors = res.scalars().all()
     all_doc_ids = [d.id for d in all_doctors]
 
+    # Batch query all today's active appointments to eliminate N+1 queries
+    doc_appts: Dict[int, List[Appointment]] = {d_id: [] for d_id in all_doc_ids}
+    if all_doc_ids:
+        q_batch = (
+            select(Appointment)
+            .where(
+                Appointment.doctor_id.in_(all_doc_ids),
+                Appointment.date == today,
+                Appointment.status.in_(["arrived", "in_progress"]),
+            )
+            .order_by(
+                Appointment.status.desc(),
+                Appointment.arrival_order.asc(),
+            )
+        )
+        appts_res = await db.execute(q_batch)
+        for appt in appts_res.scalars().all():
+            doc_appts[appt.doctor_id].append(appt)
+
     screen_list = []
     for doc in all_doctors:
         days = doc.days or []
@@ -92,22 +112,8 @@ async def get_queue_screen(db: AsyncSession) -> List[ScreenDoctor]:
         absent = str(today) in (doc.absences or [])
         late_minutes = doc.late_minutes if doc.late_date == today else 0
 
-        # Query queue for doctor today
-        q_stmt = (
-            select(Appointment)
-            .where(
-                Appointment.doctor_id == doc.id,
-                Appointment.date == today,
-                Appointment.status.in_(["arrived", "in_progress"]),
-            )
-            .order_by(
-                # in_progress first, then arrival_order
-                Appointment.status.desc(),
-                Appointment.arrival_order.asc(),
-            )
-        )
-        q_res = await db.execute(q_stmt)
-        queue = q_res.scalars().all()
+        # Retrieve cached doctor queue from batch
+        queue = doc_appts.get(doc.id, [])
 
         in_room = next((a for a in queue if a.status == "in_progress"), None)
         waiting = [a for a in queue if a.status == "arrived"]
@@ -163,9 +169,14 @@ async def get_doctor_days(db: AsyncSession, doctor_id: int) -> List[DoctorDay]:
         w_idx = get_weekday_idx(cur_date)
         work_info = None
         if w_idx < len(doc_days) and doc_days[w_idx]:
+            d_item = doc_days[w_idx]
+            sh = d_item.get("shift", "morning")
+            sh_fallback = SHIFTS.get(sh, SHIFTS["morning"])
             work_info = WorkDay(
-                branch=doc_days[w_idx]["branch"],
-                shift=doc_days[w_idx]["shift"],
+                branch=d_item["branch"],
+                shift=d_item["shift"],
+                start=d_item.get("start") or sh_fallback["start"],
+                end=d_item.get("end") or sh_fallback["end"],
             )
 
         days_result.append(
@@ -228,8 +239,10 @@ async def get_doctor_slots(
         now_minutes = now_dt.hour * 60 + now_dt.minute
 
     slots = []
-    start_shift = to_minutes(shift_info["start"])
-    end_shift = to_minutes(shift_info["end"])
+    start_str = work_day.get("start") or shift_info["start"]
+    end_str = work_day.get("end") or shift_info["end"]
+    start_shift = to_minutes(start_str)
+    end_shift = to_minutes(end_str)
 
     curr = start_shift
     while curr + slot_len <= end_shift:
@@ -252,10 +265,21 @@ async def list_doctor_schedules(db: AsyncSession) -> List[DoctorSchedule]:
 
     schedules = []
     for doc in doctors:
-        days = [
-            WorkDay(branch=d["branch"], shift=d["shift"]) if d else None
-            for d in (doc.days or [])
-        ]
+        days = []
+        for d in (doc.days or []):
+            if not d:
+                days.append(None)
+            else:
+                sh = d.get("shift", "morning")
+                sh_fallback = SHIFTS.get(sh, SHIFTS["morning"])
+                days.append(
+                    WorkDay(
+                        branch=d["branch"],
+                        shift=d["shift"],
+                        start=d.get("start") or sh_fallback["start"],
+                        end=d.get("end") or sh_fallback["end"],
+                    )
+                )
         absences = [a for a in (doc.absences or []) if a >= today_str]
         late = None
         if doc.late_date == date.today() and doc.late_minutes > 0:
@@ -366,6 +390,16 @@ async def mark_doctor_absent(db: AsyncSession, doctor_id: int, date_str: str, us
         )
 
     await log_audit(db, user, "doctor.absent", f"{doc.name_ar} · {date_str}")
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="doctor.absent",
+        payload={
+            "doctor_id": doctor_id,
+            "date": date_str,
+            "affected_count": len(affected),
+        },
+    )
     await db.commit()
     return len(affected)
 
@@ -399,5 +433,15 @@ async def mark_doctor_late(db: AsyncSession, doctor_id: int, minutes: int, user:
         )
 
     await log_audit(db, user, "doctor.late", f"{doc.name_ar} · {minutes}")
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="doctor.late",
+        payload={
+            "doctor_id": doctor_id,
+            "minutes": minutes,
+            "date": str(today),
+        },
+    )
     await db.commit()
     return len(affected)

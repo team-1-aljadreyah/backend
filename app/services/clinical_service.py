@@ -32,13 +32,28 @@ from app.schemas.service import ServiceSchema
 from app.services.audit_service import log_audit
 from app.services.notification_service import notify_patient
 from app.services.doctor_service import get_ticket_label
+from app.services.realtime_service import record_outbox_event
 
 
 async def require_doctor_sees_patient(db: AsyncSession, doctor_user: Profile, patient_id: int):
-    # Any authorized clinical staff member or doctor can review patient clinical records
-    if doctor_user.role in ("doctor", "manager", "reception"):
+    if doctor_user.role == "manager":
         return
-    raise ForbiddenException(message="Doctor does not have a clinical relationship with this patient", code="forbidden")
+    if doctor_user.role == "doctor":
+        if not doctor_user.doctor_id:
+            raise ForbiddenException(message="Doctor profile missing doctor_id", code="forbidden")
+        from sqlalchemy import func
+        doc_stmt = select(func.count(Appointment.id)).where(
+            Appointment.patient_id == patient_id,
+            Appointment.doctor_id == doctor_user.doctor_id,
+        )
+        has_appt = (await db.execute(doc_stmt)).scalar() or 0
+        if has_appt == 0:
+            raise ForbiddenException(
+                message="Doctor can only access records of patients who have or had an appointment with them",
+                code="forbidden",
+            )
+        return
+    raise ForbiddenException(message="User does not have clinical access to this patient", code="forbidden")
 
 
 async def start_visit(db: AsyncSession, appt_id: int, user: Profile):
@@ -52,6 +67,27 @@ async def start_visit(db: AsyncSession, appt_id: int, user: Profile):
 
     appt.status = "in_progress"
     appt.called_at = datetime.now(timezone.utc)
+
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="visit.started",
+        payload={
+            "appointment_id": appt.id,
+            "doctor_id": appt.doctor_id,
+            "ticket_number": appt.ticket,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{appt.doctor_id}",
+        event_type="visit.started",
+        payload={
+            "appointment_id": appt.id,
+            "ticket_number": appt.ticket,
+        },
+    )
+
     await db.commit()
 
 
@@ -159,6 +195,25 @@ async def finish_visit(db: AsyncSession, appt_id: int, req: FinishVisitRequest, 
         next_ticket_str = get_ticket_label(next_appt.doctor_id, d_ids, next_appt.ticket)
 
     await log_audit(db, user, "visit.finish", patient.name)
+
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="visit.finished",
+        payload={
+            "appointment_id": appt.id,
+            "doctor_id": appt.doctor_id,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{appt.doctor_id}",
+        event_type="visit.finished",
+        payload={
+            "appointment_id": appt.id,
+        },
+    )
+
     await db.commit()
 
     return FinishVisitResult(next_ticket=next_ticket_str)
@@ -228,8 +283,7 @@ async def save_vitals(db: AsyncSession, appt_id: int, req: Vitals, user: Profile
 
 
 async def get_patient_vitals(db: AsyncSession, patient_id: int, user: Profile) -> List[VitalsRecord]:
-    if user.role == "doctor":
-        await require_doctor_sees_patient(db, user, patient_id)
+    await require_doctor_sees_patient(db, user, patient_id)
 
     stmt = select(AppointmentVitals).where(AppointmentVitals.patient_id == patient_id).order_by(
         AppointmentVitals.at.desc()
@@ -254,8 +308,7 @@ async def get_patient_vitals(db: AsyncSession, patient_id: int, user: Profile) -
 
 
 async def get_patient_alerts(db: AsyncSession, patient_id: int, user: Profile) -> MedicalAlerts:
-    if user.role == "doctor":
-        await require_doctor_sees_patient(db, user, patient_id)
+    await require_doctor_sees_patient(db, user, patient_id)
 
     stmt = select(Patient).where(Patient.id == patient_id)
     p = (await db.execute(stmt)).scalar_one_or_none()

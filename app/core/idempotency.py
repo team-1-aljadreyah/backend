@@ -34,7 +34,7 @@ async def check_idempotency(
     """
     Checks if an idempotency key has already been processed.
     Returns (status_code, response_data) if already processed.
-    Raises ConflictException if key was used with different payload.
+    Raises ConflictException if key was used with different payload or another user/action.
     Returns None if key is fresh.
     """
     if not key:
@@ -46,6 +46,19 @@ async def check_idempotency(
 
     if not record:
         return None
+
+    # Scope verification: Prevent cross-user / cross-action key hijacking
+    if record.action != action:
+        raise ConflictException(
+            message="Idempotency key already used for a different operation",
+            code="idempotency_conflict",
+        )
+
+    if user_id is not None and record.user_id is not None and record.user_id != user_id:
+        raise ConflictException(
+            message="Idempotency key already claimed by another user",
+            code="idempotency_conflict",
+        )
 
     req_hash = compute_request_hash(payload)
     if record.request_hash != req_hash:

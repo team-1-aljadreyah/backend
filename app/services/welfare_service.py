@@ -6,6 +6,7 @@ from fastapi import UploadFile
 from sqlalchemy import select, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundException, ConflictException, UnprocessableEntityException, ForbiddenException
+from app.core.logging import logger
 from app.database.models.appointment import Appointment
 from app.database.models.finance import InvoiceItem
 from app.database.models.patient import Patient, WelfareRequest
@@ -13,19 +14,39 @@ from app.database.models.profile import Profile
 from app.schemas.welfare import WelfareRequestSchema, WelfareReviewRequest
 from app.services.audit_service import log_audit
 from app.services.notification_service import notify_patient, notify_role
+from app.core.security import create_file_download_token
 
 UPLOAD_DIR = os.path.join(os.getcwd(), "uploads", "welfare")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 def _welfare_to_schema(w: WelfareRequest) -> WelfareRequestSchema:
+    p_url = w.photo_url or ""
+    if p_url.startswith("/uploads/"):
+        fname = p_url.split("/")[-1]
+        p_url = f"/storage/v1/object/authenticated/welfare/{fname}"
+
+    if p_url.startswith("/storage/v1/object/authenticated/") or p_url.startswith("/files/"):
+        if "?token=" not in p_url:
+            parts = p_url.split("/")
+            bucket = parts[-2]
+            filename = parts[-1].split("?")[0]
+            token = create_file_download_token(
+                filename=filename,
+                bucket=bucket,
+                user_id=w.patient_id,
+                role="welfare_viewer",
+                expires_in_seconds=86400,
+            )
+            p_url = f"{p_url}?token={token}"
+
     return WelfareRequestSchema(
         id=w.id,
         patient_id=w.patient_id,
         patient_name=w.patient_name,
         patient_phone=w.patient_phone,
         card_number=w.card_number,
-        photo_url=w.photo_url,
+        photo_url=p_url,
         status=w.status,
         submitted_at=w.submitted_at.isoformat() if w.submitted_at else "",
         reviewed_by=w.reviewed_by,
@@ -128,15 +149,34 @@ async def submit_welfare(
     if not card_clean:
         raise UnprocessableEntityException("Card number is required", "bad_card_number")
 
-    # Read and save photo file
+    # Read and strictly validate photo file magic bytes & size before saving
+    if photo.filename:
+        if ".." in photo.filename or "/" in photo.filename or "\\" in photo.filename:
+            raise UnprocessableEntityException(
+                message="Invalid file name: path traversal characters detected",
+                code="validation.invalidFileName",
+            )
+    content = await photo.read()
     ext = os.path.splitext(photo.filename or "")[1] or ".jpg"
     unique_filename = f"{uuid.uuid4().hex}{ext}"
+    ct = photo.content_type or ("image/png" if ext == ".png" else "image/jpeg")
+
+    from app.integrations.supabase_storage import supabase_storage
+    supabase_storage.validate_file(ct, content, unique_filename)
+
+    # Save to local uploads directory
     local_path = os.path.join(UPLOAD_DIR, unique_filename)
-    content = await photo.read()
     with open(local_path, "wb") as f:
         f.write(content)
 
-    photo_url = f"/uploads/welfare/{unique_filename}"
+    photo_url = f"/storage/v1/object/authenticated/welfare/{unique_filename}"
+    try:
+        storage_file = await supabase_storage.upload_file(unique_filename, content, ct, bucket="welfare")
+        signed_url = await supabase_storage.create_signed_url(unique_filename, bucket="welfare")
+        if signed_url:
+            photo_url = signed_url
+    except Exception as upload_err:
+        logger.warning(f"Supabase upload failed, using local photo URL: {upload_err}")
 
     # Check for existing pending request
     stmt_pending = select(WelfareRequest).where(

@@ -98,6 +98,8 @@ async def create_payment_session(
         )
         existing = (await db.execute(stmt_existing)).scalar_one_or_none()
         if existing:
+            if existing.user_id != user.id or existing.appointment_id != appointment_id:
+                raise ConflictException("Idempotency key already used with different parameters", "idempotency_conflict")
             return _session_to_schema(existing, appt.pay_by)
 
     # Ensure visit fee item exists on this appointment
@@ -122,16 +124,19 @@ async def create_payment_session(
     money = await finance_service.get_money_summary(db, appointment_id)
     owed = money.balance.get("IQD", 0.0)
 
+    if owed <= 0:
+        raise ConflictException("No outstanding balance for this appointment", "zero_balance")
+
     settings = await admin_service.get_clinic_settings(db)
     deposit_val = float(getattr(settings, "deposit_amount", 10000.0))
 
     if pay_choice == "deposit":
-        amount = min(deposit_val, owed) if owed > 0 else deposit_val
+        amount = min(deposit_val, owed)
     else:
-        amount = owed if owed > 0 else 25000.0
+        amount = owed
 
-    # Ensure amount is strictly greater than 0
-    amount = max(float(amount), 1000.0)
+    # Ensure amount does not exceed outstanding balance
+    amount = min(float(amount), owed)
 
     # Check deposit requirement
     from app.services.appointment_service import get_patient_booking_rules
@@ -276,6 +281,13 @@ async def simulate_gateway_outcome(
     outcome: PaymentStatus,
     user: Optional[Profile] = None,
 ) -> PaymentSessionSchema:
+    from app.core.config import settings
+    if settings.APP_ENV == "production":
+        raise ForbiddenException("Payment simulation is disabled in production environments", "simulation_disabled")
+
+    if user and user.role not in ("manager", "accountant") and settings.APP_ENV not in ("testing", "development"):
+        raise ForbiddenException("Only managers or accountants can simulate payment outcomes", "forbidden")
+
     stmt = select(PaymentSession).where(PaymentSession.id == payment_id)
     session = (await db.execute(stmt)).scalar_one_or_none()
     if not session:
@@ -323,7 +335,7 @@ async def get_patient_payment_history(
     offset: int = 0,
     patient_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    # Determine target patients
+    # Determine target patients strictly by authorization
     if user.role == "patient":
         stmt_p = select(Patient.id).where(Patient.account_id == user.id)
         family_ids = (await db.execute(stmt_p)).scalars().all()
@@ -333,12 +345,26 @@ async def get_patient_payment_history(
             target_patient_ids = [patient_id]
         else:
             target_patient_ids = family_ids
-    else:
+    elif user.role in ("manager", "accountant", "reception"):
+        # Authorized financial / front-desk staff
         if patient_id:
             target_patient_ids = [patient_id]
-        else:
+        elif user.role in ("manager", "accountant"):
             stmt_all = select(Patient.id)
             target_patient_ids = (await db.execute(stmt_all)).scalars().all()
+        else:
+            # Reception querying /me/payments without patient_id: return own family
+            stmt_p = select(Patient.id).where(Patient.account_id == user.id)
+            target_patient_ids = (await db.execute(stmt_p)).scalars().all()
+    else:
+        # Non-financial staff (reception, doctor, pharmacy, lab) querying /me/payments
+        # must NOT receive all clinic records. Only their own family records if they have an account.
+        stmt_p = select(Patient.id).where(Patient.account_id == user.id)
+        target_patient_ids = (await db.execute(stmt_p)).scalars().all()
+        if patient_id:
+            if patient_id not in target_patient_ids:
+                raise ForbiddenException("Staff role not authorized to view patient financial ledger", "forbidden")
+            target_patient_ids = [patient_id]
 
     if not target_patient_ids:
         return {"items": [], "total": 0}

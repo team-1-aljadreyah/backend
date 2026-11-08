@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models.governance import Notification
 from app.database.models.patient import Patient
 from app.database.models.profile import Profile
+from app.services.realtime_service import record_outbox_event
 
 
 async def notify_user(
@@ -29,6 +30,18 @@ async def notify_user(
         read=False,
     )
     db.add(item)
+
+    # Publish transactional outbox event for user-specific real-time delivery
+    record_outbox_event(
+        db=db,
+        channel=f"user:{user_id}",
+        event_type="notification.created",
+        payload={
+            "user_id": user_id,
+            "type": notification_type,
+            "params": params,
+        },
+    )
 
 
 async def notify_patient(

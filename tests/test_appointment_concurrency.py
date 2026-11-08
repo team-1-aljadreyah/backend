@@ -125,7 +125,7 @@ class TestAppointmentConcurrency(unittest.IsolatedAsyncioTestCase):
             "idempotency_key": f"free-slot-test-{target_day}-{target_slot}",
         }
         res_book = await self.client.post("/appointments", json=payload, headers=self.patient_headers)
-        self.assertEqual(res_book.status_code, 200)
+        self.assertEqual(res_book.status_code, 200, f"FAILED TO BOOK: {res_book.text}")
         appt_id = res_book.json()["data"]["appointment_id"]
 
         # Cancel

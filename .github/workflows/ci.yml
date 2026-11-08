@@ -1,3 +1,4 @@
+
 name: CI Pipeline
 
 on:
@@ -35,12 +36,19 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff
+          python -m pip install -r requirements-dev.txt
+
+      - name: Verify Testing Tools
+        run: |
+          python --version
+          python -m pip show pytest
+          python -m pip show pytest-asyncio
+          python -m pip show ruff
 
       - name: Validate Python Syntax & Bytecode Compilation
         run: |
@@ -52,7 +60,7 @@ jobs:
 
       - name: Run Automated Test Suite (Pytest)
         run: |
-          pytest -v --asyncio-mode=auto
+          python -m pytest -v --asyncio-mode=auto
 
       - name: Clean Up Test Artifacts
         if: always()

@@ -18,14 +18,14 @@ class TestClinicalAndLab(unittest.IsolatedAsyncioTestCase):
         # Create walk-in to get an active appointment today
         w_res = await self.client.post(
             "/walk-ins",
-            json={"name": "Vitals Patient", "phone": "07711223344", "doctor_id": 1, "emergency": False},
+            json={"name": "Vitals Patient Ali", "phone": "07711223344", "doctor_id": 1, "emergency": False},
             headers=self.reception_headers,
         )
         self.assertEqual(w_res.status_code, 200)
 
         # Get queue to identify appointment id
         q_res = await self.client.get("/doctors/1/queue", headers=self.doctor_headers)
-        appt = next(a for a in q_res.json()["data"] if a["patient_name"] == "Vitals Patient")
+        appt = next(a for a in q_res.json()["data"] if a["patient_name"] == "Vitals Patient Ali")
         appt_id = appt["id"]
         patient_id = appt["patient_id"]
 

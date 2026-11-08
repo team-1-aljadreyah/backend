@@ -294,7 +294,8 @@ async def list_prescriptions(db: AsyncSession) -> List[PrescriptionSchema]:
 
 
 async def dispense_prescription(db: AsyncSession, visit_id: int, req: DispenseRequest, user: Profile) -> Optional[PharmacySaleSchema]:
-    stmt = select(Visit, Patient).join(Patient, Visit.patient_id == Patient.id).where(Visit.id == visit_id)
+    # Lock visit row to prevent double-dispense race condition
+    stmt = select(Visit, Patient).join(Patient, Visit.patient_id == Patient.id).where(Visit.id == visit_id).with_for_update()
     row = (await db.execute(stmt)).first()
     if not row:
         raise NotFoundException(message="Prescription not found", code="not_found")
@@ -320,18 +321,22 @@ async def dispense_prescription(db: AsyncSession, visit_id: int, req: DispenseRe
                 raise UnprocessableEntityException(message="Quantity must be greater than 0", code="bad_amount")
             needed[line.stock_id] = needed.get(line.stock_id, 0) + line.quantity
 
-    # Validate stock quantities and expiration
+    # Validate stock quantities and expiration with row locks in deterministic ID order to avoid deadlocks
     stock_items_map = {}
+    if needed:
+        s_stmt = select(StockItem).where(StockItem.id.in_(list(needed.keys()))).order_by(StockItem.id).with_for_update()
+        s_res = await db.execute(s_stmt)
+        for item in s_res.scalars().all():
+            stock_items_map[item.id] = item
+
     for stock_id, qty in needed.items():
-        s_stmt = select(StockItem).where(StockItem.id == stock_id)
-        item = (await db.execute(s_stmt)).scalar_one_or_none()
+        item = stock_items_map.get(stock_id)
         if not item:
             raise NotFoundException(message=f"Stock item {stock_id} not found", code="not_found")
         if get_stock_expiry(item.expires_on) == "expired":
             raise ConflictException(message=f"Stock item '{item.name}' is expired", code="stock_expired")
         if item.quantity < qty:
             raise ConflictException(message=f"Stock item '{item.name}' is out of stock (available: {item.quantity}, requested: {qty})", code="out_of_stock")
-        stock_items_map[stock_id] = item
 
     # Execute inventory decrements & create sale lines
     sale_lines = []
@@ -416,16 +421,20 @@ async def sell_over_counter(db: AsyncSession, req: CounterSaleRequest, user: Pro
         needed[line.stock_id] = needed.get(line.stock_id, 0) + line.quantity
 
     stock_items_map = {}
+    if needed:
+        s_stmt = select(StockItem).where(StockItem.id.in_(list(needed.keys()))).order_by(StockItem.id).with_for_update()
+        s_res = await db.execute(s_stmt)
+        for item in s_res.scalars().all():
+            stock_items_map[item.id] = item
+
     for stock_id, qty in needed.items():
-        s_stmt = select(StockItem).where(StockItem.id == stock_id)
-        item = (await db.execute(s_stmt)).scalar_one_or_none()
+        item = stock_items_map.get(stock_id)
         if not item:
             raise NotFoundException(message=f"Stock item {stock_id} not found", code="not_found")
         if get_stock_expiry(item.expires_on) == "expired":
             raise ConflictException(message=f"Item '{item.name}' is expired", code="stock_expired")
         if item.quantity < qty:
             raise ConflictException(message=f"Item '{item.name}' out of stock", code="out_of_stock")
-        stock_items_map[stock_id] = item
 
     now_utc = datetime.now(timezone.utc)
     sale_lines = []

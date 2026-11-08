@@ -1,16 +1,16 @@
-# Al-Jadreyah Clinic Management System - Test Execution & Verification Report
+# Al-Jadreyah Clinic Management System - Test Execution & Security Verification Report
 
-**Environment**: Production / Testing  
-**Live URL**: `https://api.ama8.uk`  
-**Interactive API Documentation**: `https://api.ama8.uk/docs` (or `http://89.144.46.249/docs`)  
-**Single Source of Truth Database Schema**: [`backend/database/schema.sql`](file:///C:/Users/Administrator/Desktop/rahma/backend/database/schema.sql)  
-**Execution Timestamp**: 2026-11-05 14:16 UTC  
+**Environment**: Production Hardened / Isolated Testing  
+**Live Backend URL**: `https://api.ama8.uk`  
+**API Documentation**: `https://api.ama8.uk/docs`  
+**Database Schema**: [`backend/database/schema.sql`](file:///C:/Users/Administrator/Desktop/rahma/backend/database/schema.sql)  
+**Execution Timestamp**: 2026-11-08 15:50 UTC  
 
 ---
 
 ## 1. Executive Summary
 
-All 26 automated integration and end-to-end unit tests have been successfully executed with a **100% pass rate** (`26 passed, 0 failed`). The production FastAPI server is running on **Port 80**, properly proxying requests from `https://api.ama8.uk` and accepting cross-origin requests from the Next.js frontend (`https://alrahma.ama8.uk`).
+A comprehensive automated test suite of **50 tests** across 10 test modules was executed. **49 passed, 1 skipped** (PostgreSQL GiST exclusion test safely skipped on local SQLite per strict safety instructions never to run destructive tests against production Supabase). **Zero test failures** (`0 failed`).
 
 ```text
 ============================= test session starts =============================
@@ -20,100 +20,59 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.12.1, asyncio-1.4.1.post1
 asyncio: mode=Mode.AUTO, debug=False
+collected 50 items
 
-collected 26 items
+tests\test_appointment_concurrency.py ...                                [  6%]
+tests\test_appointments_and_queues.py ...                                [ 12%]
+tests\test_audit_comprehensive.py ........                               [ 28%]
+tests\test_auth_and_security.py ......                                   [ 40%]
+tests\test_clinical_and_lab.py ..                                        [ 44%]
+tests\test_concurrency_and_idempotency.py ...                            [ 50%]
+tests\test_finance_and_accounting.py ....                                [ 58%]
+tests\test_live_supabase_exclusion.py s                                  [ 60%]
+tests\test_online_payments_and_welfare.py .....                          [ 70%]
+tests\test_patient_merge_and_dedup.py .....                              [ 80%]
+tests\test_patient_privacy_and_features.py .......                       [ 94%]
+tests\test_pharmacy_and_inventory.py ...                                 [100%]
 
-tests/test_appointments_and_queues.py ...                                [ 11%]
-tests/test_auth_and_security.py ......                                   [ 34%]
-tests/test_clinical_and_lab.py ..                                        [ 42%]
-tests/test_concurrency_and_idempotency.py ...                            [ 53%]
-tests/test_finance_and_accounting.py ....                                [ 69%]
-tests/test_online_payments_and_welfare.py .....                          [ 88%]
-tests/test_pharmacy_and_inventory.py ...                                 [100%]
-
-======================== 26 passed, 1 warning in 9.12s ========================
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_live_supabase_exclusion.py:17: Test requires PostgreSQL engine
+======================= 49 passed, 1 skipped in 23.44s ========================
 ```
 
 ---
 
 ## 2. Test Suites & Coverage Breakdown
 
-### 2.1 Appointments & Queues (`tests/test_appointments_and_queues.py`)
-- **Walk-in & Ticket Numbering**: Verifies sequential queuing and doctor priority scheduling.
-- **Doctor Absence & Rescheduling**: Automatically cascades cancellations and notifies affected patients.
-- **Queue Movement & Check-in**: Arrived, in-progress, and completed states.
+### 2.1 Audit & Comprehensive Security (`tests/test_audit_comprehensive.py`)
+- **SEC-CLIN-01 (Clinical Route Privacy)**: Verified that Reception is strictly blocked from `GET /patients/{id}/alerts`, `GET /patients/{id}/vitals`, and `GET /patients/{id}/visits` (`403 Forbidden`).
+- **SEC-AUTH-01 (Mock Token Elimination)**: Verified that `mock-token-*` and `mock-refresh-*` tokens are strictly rejected (`401 Unauthorized`).
+- **SEC-AUTH-02 (Token Type Enforcement)**: Verified that refresh tokens cannot be used as Bearer access tokens on protected API endpoints.
+- **SEC-AUTH-03 (Argon2id Hashing)**: Verified password generation and verification using Argon2id with backward compatibility for legacy hashes.
+- **SEC-FILE-01 (File Magic Bytes & Path Traversal)**: Verified that forged files (corrupted headers) and filenames with directory traversal (`../../`) are rejected (`422 Unprocessable Entity`).
+- **SEC-APPT-01 (State Machine Enforcement)**: Verified that appointments in non-booked states cannot be checked in.
+- **SEC-REALTIME (Realtime Tickets)**: Verified generation of 60-second single-use tickets for WebSocket connection.
+- **SEC-IDEMP-01 (Idempotency Multi-Tenant Scoping)**: Verified that idempotency keys cannot be hijacked across users or modified with different payloads.
 
-### 2.2 Authentication & Security (`tests/test_auth_and_security.py`)
-- **Strict Role-Based Access Control (RBAC)**: Unauthenticated requests return `401 Unauthorized`.
-- **Administrative Self-Assignment Prevention**: Patients attempting to register as managers are clamped to `patient`.
-- **Live Credentials & Password Length**: Supports all specified staff test accounts (`Reception123!`, `Doctor123!`, `Manager123!`, `Lab123!`, `Accountant123!`, `Pharmacy123!`, `Patient123!`) with standardized 6+ character minimum rules matching frontend Zod validation schemas.
-- **Password Recovery & Change**:
-  - `POST /auth/password/change` with invalid current password returns **HTTP 422 with code `wrong_password`** (never 401, preventing unintended user signouts).
-  - `POST /auth/password/forgot` generates SMS expiration windows and dev codes.
-  - `POST /auth/password/reset` enforces 10-minute expiry and 5-attempt brute-force throttling (`too_many_tries`, `code_wrong`, `code_expired`).
+### 2.2 Patient Privacy & Features (`tests/test_patient_privacy_and_features.py`)
+- **Doctor File Restriction**: Verified that a doctor can only access files of patients who have or had an appointment with them.
+- **Reception Medical File Masking**: Verified `GET /patients/{id}/file` returns empty visits, diagnoses, prescriptions, and alerts to receptionists while managers receive full files.
+- **Audit Logging**: Verified that every file access generates an immutable audit log entry recording actor and timestamp.
+- **Three-Part Name Validation**: Verified that Arabic compound names ("عبد الكريم", "أبو بكر") are treated as single parts and names with titles ("د.") are validated to exactly 3 parts.
+- **Custom Working Hours**: Verified `PUT /doctors/{id}/schedule` accepts `"start"` and `"end"` HH:MM strings and returns them in `GET /doctors/schedules`.
+- **Users List Pagination & Filtering**: Verified `GET /users` pagination (`limit`, `offset`), search (`name`, `phone`), and role filters (`doctor`, `doctors only`, `الأطباء`).
+- **Secure Forgot & Reset Password Flow**: Verified OTP verification with 10-minute expiry and session revocation.
 
-### 2.3 Clinical Records & Laboratory (`tests/test_clinical_and_lab.py`)
-- **Doctor Consultation & Diagnosis**: Prescriptions, services, and finish visit workflow.
-- **Lab Order Processing**: Entry of test values or file uploads, confirmation, and automatic notifications to ordering doctors and patients.
+### 2.3 Appointment Concurrency & State Machine (`tests/test_appointment_concurrency.py`, `tests/test_appointments_and_queues.py`)
+- **Concurrent Booking Protection**: PostgreSQL GiST exclusion / row-level lock serialization prevents double-booking the same doctor time slot.
+- **Sequential Queue Tickets**: Doctor row locking prevents duplicate queue ticket allocations.
+- **Past Appointment Prevention**: Rejects booking appointments in the past using Baghdad timezone (`Asia/Baghdad`).
 
-### 2.4 Concurrency & Idempotency (`tests/test_concurrency_and_idempotency.py`)
-- **Double Booking Protection**: Concurrency locks prevent overlapping time slots for the same doctor.
-- **Idempotency Key Handling**:
-  - Headers `Idempotency-Key` and `X-Idempotency-Key` are accepted on:
-    - `POST /walk-ins`
-    - `POST /appointments`
-    - `POST /appointments/by-staff`
-    - `POST /appointments/{id}/check-in`
-    - `POST /appointments/{id}/pay-cash`
-    - `POST /appointments/{id}/payments`
-    - `POST /pharmacy/sales`
-    - `POST /pharmacy/stock/{id}/receive`
-  - Re-submitting an identical idempotency key returns the original result without duplicating financial transactions or database rows.
+### 2.4 Pharmacy & Inventory (`tests/test_pharmacy_and_inventory.py`)
+- **Deterministic Row Locking**: Prescription dispensing and counter sales lock inventory items ordered by `id` with `with_for_update()`, preventing deadlocks and race conditions.
+- **Double-Dispense Prevention**: Locks `Visit` record to eliminate race conditions between multiple pharmacy staff.
 
-### 2.5 Finance, Ledger & Pagination Contracts (`tests/test_finance_and_accounting.py`)
-- **Standard Pagination Shape**:
-  - `GET /patients?limit=&offset=` → `{ "items": [...], "total": count }`
-  - `GET /audit?limit=&offset=` → `{ "items": [...], "total": count }`
-  - `GET /ledger?limit=&offset=` → `{ "items": [...], "total": count }`
-  - `GET /me/payments?limit=&offset=` → `{ "items": [...], "total": count }`
-  *(Eliminates frontend React Turbopack `.slice()` / `.length` runtime crashes on infinite scrolls).*
-- **Cashier Closings & Reversals**: Full audit trail, expense voiding, and accountant payment reversals.
-
-### 2.6 Online Payments (Qi Card Gateway) & Social Welfare (`tests/test_online_payments_and_welfare.py`)
-- **Qi Card Gateway Flow**:
-  - `POST /appointments/{id}/payments`: Returns `PaymentSession` (`payment_id`, `appointment_id`, `amount`, `currency`, `status`, `form_url`, `created_at`, `pay_by`).
-  - `GET /payments/{id}`: Validates session status (`created`, `success`, `failed`, `authentication_failed`, `canceled`). Only readable by the patient who initiated or staff.
-  - Settle check: Money is only recorded as paid upon signed notification / gateway verification, not simply because a user returned to the page.
-  - Automatic Deposit Cancellation: Patients requiring deposits get `pay_by = 15 minutes`. Unpaid appointments auto-cancel with `cancel_reason: "unpaid"`.
-  - Upcoming Bookings: `GET /appointments/upcoming?days=14&doctor_id=1&include_today=true` returns structured staff appointments.
-- **Social Welfare (الرعاية الاجتماعية)**:
-  - `POST /patients/{id}/welfare`: Multipart photo and card number submission. Triggers `welfare_submitted` reception notification and audit log.
-  - `GET /me/welfare`: Returns the latest welfare status for each family member.
-  - `GET /welfare?status=pending|approved|rejected`: Reception review queue.
-  - `POST /welfare/{id}/review`: Approves or rejects welfare requests. Upon approval, automatically applies a 25% discount line item (kind: `discount`, negative price rounded to 250 IQD) to all booked unpaid visits.
-  - `GET /patients/{id}/booking-rules`: Includes `welfare_percent`.
-
-### 2.7 User Management & "موقوف" Resolution
-- `GET /users` returns `active: bool` for every account (`active=true` for all active staff), completely resolving the frontend "موقوف" (suspended) badge issue.
-- `PATCH /users/{id}`, `POST /users/{id}/enable`, and `POST /users/{id}/disable` fully supported.
-
----
-
-## 3. Live Server Endpoint Health
-
-Verified directly on `http://127.0.0.1:80` and `https://api.ama8.uk`:
-
-| Endpoint | Method | Status | Verification Detail |
-|---|---|---|---|
-| `/docs` | GET | `200 OK` | Interactive Swagger UI loaded |
-| `/openapi.json` | GET | `200 OK` | Full OpenAPI v3 specification |
-| `/health` | GET | `200 OK` | Healthy system status |
-| `/auth/login` | POST | `200 OK` | Verified for Reception, Doctor, Manager, Patient |
-| `/appointments/upcoming` | GET | `200 OK` | Returns bookings with `days` & `include_today` |
-| `/users` | GET | `200 OK` | 18/18 active accounts (`active: true`) |
-| `/patients` | GET | `200 OK` | Wrapped `{ "items": [...], "total": count }` |
-| `/audit` | GET | `200 OK` | Wrapped `{ "items": [...], "total": count }` |
-| `/ledger` | GET | `200 OK` | Wrapped `{ "items": [...], "total": count }` |
-| `/me/payments` | GET | `200 OK` | Wrapped `{ "items": [...], "total": count }` |
-| `/welfare` | GET | `200 OK` | Review queue accessible by staff |
-| `/auth/password/change` | POST | `422 Unprocessable` | Code: `wrong_password` (Preserves session) |
+### 2.5 Payments & Welfare (`tests/test_online_payments_and_welfare.py`)
+- **Qi Card Payment Gateway**: Secure session creation with idempotency, environment-specific URLs, and webhook signature verification (`X-Signature`).
+- **Production Payment Safety**: Payment simulation disabled in production.
+- **Welfare Discount Automation**: Validated application of percentage discounts with database check constraint compatibility (`price >= 0 OR kind = 'discount'`).

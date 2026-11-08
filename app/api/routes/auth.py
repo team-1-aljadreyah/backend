@@ -1,8 +1,11 @@
-from fastapi import APIRouter, Depends, status
+from typing import Optional
+from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.connection import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, get_current_user_optional
 from app.core.envelope import success_response
+from app.core.rate_limiter import enforce_rate_limit, get_client_ip
 from app.database.models.profile import Profile
 from app.schemas.auth import (
     LoginRequest,
@@ -19,20 +22,32 @@ from app.services import auth_service
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+class LogoutRequest(BaseModel):
+    refresh_token: Optional[str] = None
+
+
 @router.post("/login")
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await enforce_rate_limit(db, request, action="auth.login", max_requests=20, window_seconds=60)
     res = await auth_service.login(db, req)
     return success_response(res.model_dump())
 
 
 @router.post("/register")
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(req: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await enforce_rate_limit(db, request, action="auth.register", max_requests=10, window_seconds=300)
     res = await auth_service.register(db, req)
     return success_response(res.model_dump())
 
 
 @router.post("/logout")
-async def logout():
+async def logout(
+    req: Optional[LogoutRequest] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[Profile] = Depends(get_current_user_optional),
+):
+    if current_user:
+        await auth_service.logout(db, current_user, req.refresh_token if req else None)
     return success_response(None)
 
 
@@ -54,7 +69,8 @@ async def change_password(
 
 @router.post("/password/forgot")
 @router.post("/forgot-password")
-async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+async def forgot_password(req: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await enforce_rate_limit(db, request, action="auth.forgot_password", max_requests=5, window_seconds=300, identifier=req.phone)
     res = await auth_service.forgot_password(db, req.phone)
     return success_response(res)
 

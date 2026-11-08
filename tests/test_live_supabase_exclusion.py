@@ -7,9 +7,14 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_live_supabase_gist_exclusion_constraint():
-    """Directly verifies PostgreSQL GiST exclusion constraint on live Supabase pooler."""
+    """Directly verifies PostgreSQL GiST exclusion constraint on isolated test engine."""
+    from app.core.config import settings
+    # Strict safety guard: Never run destructive tests against live production Supabase database
+    if settings.APP_ENV == "production" or "supabase.com" in str(settings.DATABASE_URL):
+        pytest.skip("SAFETY GUARD: Never run destructive tests against live production database")
+
     if engine.dialect.name != "postgresql":
-        pytest.skip("Test requires live PostgreSQL (Supabase) engine")
+        pytest.skip("Test requires PostgreSQL engine")
     async with engine.begin() as conn:
         # Check that the exclusion constraint exists
         res = await conn.execute(text("""

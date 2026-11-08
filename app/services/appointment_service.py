@@ -1,3 +1,4 @@
+from zoneinfo import ZoneInfo
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional, Tuple, Dict, Any
 from sqlalchemy import select, func, and_, or_
@@ -30,13 +31,14 @@ from app.schemas.doctor import DoctorSchema
 from app.schemas.finance import MoneySummary
 from app.services.audit_service import log_audit
 from app.core.idempotency import check_idempotency, save_idempotency_record
-from app.core.security import normalize_phone_local, normalize_patient_name
+from app.core.security import normalize_phone_local, normalize_patient_name, validate_three_part_name
 from app.services.patient_service import resolve_active_patient
 from app.services.notification_service import notify_patient
 from app.services.patient_service import compute_money_for_appointment
 from app.services.doctor_service import get_doctor_slots, get_weekday_idx, get_ticket_label, SHIFTS
 from app.services.welfare_service import get_welfare_percent, add_welfare_discount
 from app.services.payment_service import create_payment_session, clean_expired_unpaid_appointments
+from app.services.realtime_service import record_outbox_event
 
 
 async def get_settings(db: AsyncSession) -> ClinicSettings:
@@ -82,6 +84,10 @@ async def can_change_appointment(db: AsyncSession, appt: Appointment) -> bool:
 async def issue_ticket_for_appointment(db: AsyncSession, appt: Appointment):
     if appt.ticket:
         return
+    # Lock doctor row to serialize ticket assignment and eliminate ticket number collisions
+    d_lock = select(Doctor.id).where(Doctor.id == appt.doctor_id).with_for_update()
+    await db.execute(d_lock)
+
     stmt = select(func.max(Appointment.ticket)).where(
         Appointment.doctor_id == appt.doctor_id,
         Appointment.date == appt.date,
@@ -90,8 +96,23 @@ async def issue_ticket_for_appointment(db: AsyncSession, appt: Appointment):
     max_ticket = res.scalar_one() or 0
     appt.ticket = max_ticket + 1
 
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="appointment.ticket_issued",
+        payload={
+            "appointment_id": appt.id,
+            "doctor_id": appt.doctor_id,
+            "ticket_number": appt.ticket,
+        },
+    )
+
 
 async def get_next_arrival_order(db: AsyncSession, target_date: date) -> int:
+    # Lock clinic settings row to serialize arrival ordering for the clinic queue
+    s_lock = select(ClinicSettings.id).where(ClinicSettings.id == 1).with_for_update()
+    await db.execute(s_lock)
+
     stmt = select(func.max(Appointment.arrival_order)).where(Appointment.date == target_date)
     res = await db.execute(stmt)
     max_order = res.scalar_one() or 0
@@ -141,6 +162,9 @@ async def book_appointment(db: AsyncSession, req: BookRequest, user: Profile) ->
     # Time calculations (Baghdad Asia/Baghdad timezone UTC+3)
     duration = doctor.new_minutes if req.kind == "new" else doctor.followup_minutes
     start_time = datetime.fromisoformat(f"{req.date}T{req.time}:00+03:00")
+    now_baghdad = datetime.now(ZoneInfo("Asia/Baghdad"))
+    if start_time < now_baghdad:
+        raise ConflictException(message="Cannot book appointments in the past", code="past_appointment")
     end_time = start_time + timedelta(minutes=duration)
 
     new_appt = Appointment(
@@ -197,6 +221,28 @@ async def book_appointment(db: AsyncSession, req: BookRequest, user: Profile) ->
     await log_audit(db, user, "appointment.book", patient.name)
     result = BookResult(appointment_id=new_appt.id, payment=payment_session)
     await save_idempotency_record(db, req.idempotency_key, "appointment.book", req, 200, result.model_dump(), user.id)
+
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="appointment.booked",
+        payload={
+            "appointment_id": new_appt.id,
+            "doctor_id": new_appt.doctor_id,
+            "date": str(new_appt.date),
+            "time": new_appt.time,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{new_appt.doctor_id}",
+        event_type="appointment.booked",
+        payload={
+            "appointment_id": new_appt.id,
+            "date": str(new_appt.date),
+            "time": new_appt.time,
+        },
+    )
 
     try:
         await db.commit()
@@ -312,6 +358,28 @@ async def staff_book_appointment(db: AsyncSession, req: StaffBookRequest, user: 
     result = StaffBookResult(patient_id=target_patient_id)
     await save_idempotency_record(db, req.idempotency_key, "appointment.staff_book", req, 200, result.model_dump(), user.id)
 
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="appointment.booked",
+        payload={
+            "appointment_id": new_appt.id,
+            "doctor_id": new_appt.doctor_id,
+            "date": str(new_appt.date),
+            "time": new_appt.time,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{new_appt.doctor_id}",
+        event_type="appointment.booked",
+        payload={
+            "appointment_id": new_appt.id,
+            "date": str(new_appt.date),
+            "time": new_appt.time,
+        },
+    )
+
     try:
         await db.commit()
     except (IntegrityError, Exception):
@@ -331,14 +399,25 @@ async def cancel_appointment(db: AsyncSession, appt_id: int, user: Profile):
         raise NotFoundException(message="Appointment not found", code="not_found")
     appt, patient = row
 
-    if user.role == "patient" and patient.account_id != user.id:
-        raise ForbiddenException(message="Access forbidden", code="forbidden")
+    if user.role == "patient":
+        if patient.account_id != user.id:
+            raise ForbiddenException(message="Access forbidden: you do not own this appointment", code="forbidden")
+    elif user.role in ("reception", "manager"):
+        pass
+    elif user.role == "doctor":
+        if user.doctor_id != appt.doctor_id:
+            raise ForbiddenException(message="Doctor may only cancel their own appointments", code="forbidden")
+    else:
+        raise ForbiddenException(message="Staff role not authorized to cancel appointments", code="forbidden")
+
+    if appt.status in ("cancelled", "no_show", "done"):
+        raise ConflictException(message=f"Cannot cancel appointment with status '{appt.status}'", code="invalid_state")
 
     if not await can_change_appointment(db, appt):
         raise ConflictException(message="Appointment is within non-cancellation window", code="too_late")
 
     appt.status = "cancelled"
-    appt.cancel_reason = "patient"
+    appt.cancel_reason = "patient" if user.role == "patient" else f"staff_{user.role}"
 
     # Refund online payments
     p_stmt = select(Payment).where(
@@ -364,6 +443,25 @@ async def cancel_appointment(db: AsyncSession, appt_id: int, user: Profile):
             db.add(refund_p)
 
     await log_audit(db, user, "appointment.cancel", patient.name)
+
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="appointment.cancelled",
+        payload={
+            "appointment_id": appt.id,
+            "doctor_id": appt.doctor_id,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{appt.doctor_id}",
+        event_type="appointment.cancelled",
+        payload={
+            "appointment_id": appt.id,
+        },
+    )
+
     await db.commit()
 
 
@@ -377,11 +475,26 @@ async def reschedule_appointment(db: AsyncSession, appt_id: int, req: Reschedule
         raise NotFoundException(message="Appointment not found", code="not_found")
     appt, patient = row
 
-    if user.role == "patient" and patient.account_id != user.id:
-        raise ForbiddenException(message="Access forbidden", code="forbidden")
+    if user.role == "patient":
+        if patient.account_id != user.id:
+            raise ForbiddenException(message="Access forbidden: you do not own this appointment", code="forbidden")
+    elif user.role in ("reception", "manager"):
+        pass
+    elif user.role == "doctor":
+        if user.doctor_id != appt.doctor_id:
+            raise ForbiddenException(message="Doctor may only reschedule their own appointments", code="forbidden")
+    else:
+        raise ForbiddenException(message="Staff role not authorized to reschedule appointments", code="forbidden")
+
+    if appt.status in ("cancelled", "no_show", "done"):
+        raise ConflictException(message=f"Cannot reschedule appointment with status '{appt.status}'", code="invalid_state")
 
     if not await can_change_appointment(db, appt):
         raise ConflictException(message="Appointment is within non-changeable window", code="too_late")
+
+    new_start_time = datetime.fromisoformat(f"{req.date}T{req.time}:00+03:00")
+    if new_start_time < datetime.now(ZoneInfo("Asia/Baghdad")):
+        raise ConflictException(message="Cannot reschedule to a past time slot", code="past_appointment")
 
     slots = await get_doctor_slots(db, appt.doctor_id, req.date, appt.kind, ignore_appointment_id=appt.id)
     slot_match = next((s for s in slots if s.time == req.time), None)
@@ -396,16 +509,38 @@ async def reschedule_appointment(db: AsyncSession, appt_id: int, req: Reschedule
     branch = (doctor.days[w_idx] or {}).get("branch", "main") if w_idx < len(doctor.days or []) and doctor.days[w_idx] else "main"
 
     duration = doctor.new_minutes if appt.kind == "new" else doctor.followup_minutes
-    start_time = datetime.fromisoformat(f"{req.date}T{req.time}:00+03:00")
-    end_time = start_time + timedelta(minutes=duration)
+    end_time = new_start_time + timedelta(minutes=duration)
 
     appt.date = new_date
     appt.time = req.time
-    appt.start_time = start_time
+    appt.start_time = new_start_time
     appt.end_time = end_time
     appt.branch = branch
 
     await log_audit(db, user, "appointment.reschedule", patient.name)
+
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="appointment.rescheduled",
+        payload={
+            "appointment_id": appt.id,
+            "doctor_id": appt.doctor_id,
+            "date": str(appt.date),
+            "time": appt.time,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{appt.doctor_id}",
+        event_type="appointment.rescheduled",
+        payload={
+            "appointment_id": appt.id,
+            "date": str(appt.date),
+            "time": appt.time,
+        },
+    )
+
     try:
         await db.commit()
     except (IntegrityError, Exception):
@@ -414,6 +549,9 @@ async def reschedule_appointment(db: AsyncSession, appt_id: int, req: Reschedule
 
 
 async def check_in_appointment(db: AsyncSession, appt_id: int, emergency: bool, user: Profile, idempotency_key: Optional[str] = None):
+    if user.role not in ("reception", "manager"):
+        raise ForbiddenException(message="Only reception and manager can check in appointments", code="forbidden")
+
     if idempotency_key:
         cached = await check_idempotency(db, idempotency_key, "appointment.check_in", {"appt_id": appt_id, "emergency": emergency}, user.id)
         if cached:
@@ -428,16 +566,48 @@ async def check_in_appointment(db: AsyncSession, appt_id: int, emergency: bool, 
         raise NotFoundException(message="Appointment not found", code="not_found")
     appt, patient = row
 
-    if appt.status != "arrived":
-        arrival_order = await get_next_arrival_order(db, appt.date)
-        appt.status = "arrived"
-        appt.emergency = emergency
-        appt.arrival_order = arrival_order
-        await issue_ticket_for_appointment(db, appt)
+    if appt.status == "arrived":
+        # Idempotent re-checkin
+        return
+
+    if appt.status != "booked":
+        raise ConflictException(
+            message=f"Cannot check in appointment with status '{appt.status}'. Only booked appointments can be checked in.",
+            code="invalid_state",
+        )
+
+    arrival_order = await get_next_arrival_order(db, appt.date)
+    appt.status = "arrived"
+    appt.emergency = emergency
+    appt.arrival_order = arrival_order
+    await issue_ticket_for_appointment(db, appt)
 
     await log_audit(db, user, "appointment.checkin", patient.name)
     if idempotency_key:
         await save_idempotency_record(db, idempotency_key, "appointment.check_in", {"appt_id": appt_id, "emergency": emergency}, 200, {"success": True}, user.id)
+
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="appointment.checked_in",
+        payload={
+            "appointment_id": appt.id,
+            "doctor_id": appt.doctor_id,
+            "ticket_number": appt.ticket,
+            "emergency": emergency,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{appt.doctor_id}",
+        event_type="appointment.checked_in",
+        payload={
+            "appointment_id": appt.id,
+            "ticket_number": appt.ticket,
+            "emergency": emergency,
+        },
+    )
+
     await db.commit()
 
 
@@ -446,6 +616,8 @@ async def add_walk_in(db: AsyncSession, req: WalkInRequest, user: Profile) -> Wa
     cached = await check_idempotency(db, req.idempotency_key, "appointment.walk_in", req, user.id)
     if cached:
         return WalkInResult(**cached[1])
+
+    validate_three_part_name(req.name)
 
     norm_phone = normalize_phone_local(req.phone)
     norm_name = normalize_patient_name(req.name)
@@ -522,6 +694,29 @@ async def add_walk_in(db: AsyncSession, req: WalkInRequest, user: Profile) -> Wa
     await log_audit(db, user, "walkin.add", patient.name)
     res = WalkInResult(duplicate=duplicate)
     await save_idempotency_record(db, req.idempotency_key, "appointment.walk_in", req, 200, res.model_dump(), user.id)
+
+    record_outbox_event(
+        db=db,
+        channel="public:queue",
+        event_type="appointment.walk_in",
+        payload={
+            "appointment_id": walk_in_appt.id,
+            "doctor_id": req.doctor_id,
+            "ticket_number": walk_in_appt.ticket,
+            "emergency": req.emergency,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{req.doctor_id}",
+        event_type="appointment.walk_in",
+        payload={
+            "appointment_id": walk_in_appt.id,
+            "ticket_number": walk_in_appt.ticket,
+            "emergency": req.emergency,
+        },
+    )
+
     await db.commit()
     return res
 

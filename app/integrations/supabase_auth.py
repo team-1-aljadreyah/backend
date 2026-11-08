@@ -75,4 +75,22 @@ class SupabaseAuthClient:
         return None
 
 
+    async def send_phone_otp(self, phone: str) -> bool:
+        if not self.enabled:
+            return False
+        url = f"{self.base_url}/auth/v1/otp"
+        phone_e164 = normalize_phone_e164(phone)
+        payload = {"phone": phone_e164}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.post(url, json=payload, headers=self._headers())
+                if res.status_code in (200, 201):
+                    logger.info(f"Supabase OTP sent successfully to {phone_e164}")
+                    return True
+                logger.warning(f"Supabase send OTP returned {res.status_code}: {res.text}")
+        except Exception as e:
+            logger.error(f"Failed to send Supabase OTP to {phone_e164}: {e}")
+        return False
+
+
 supabase_auth = SupabaseAuthClient()

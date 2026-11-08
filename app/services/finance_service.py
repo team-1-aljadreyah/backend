@@ -107,16 +107,46 @@ async def get_today_invoices(db: AsyncSession) -> List[Invoice]:
     )
     rows = (await db.execute(stmt)).all()
 
+    # Batch query invoice items and payments to eliminate N+1 queries
+    appt_ids = [appt.id for appt, _, _ in rows]
+    items_by_appt: Dict[int, List[InvoiceItem]] = {a_id: [] for a_id in appt_ids}
+    payments_by_appt: Dict[int, List[Payment]] = {a_id: [] for a_id in appt_ids}
+
+    if appt_ids:
+        i_stmt = select(InvoiceItem).where(InvoiceItem.appointment_id.in_(appt_ids))
+        for it in (await db.execute(i_stmt)).scalars().all():
+            items_by_appt[it.appointment_id].append(it)
+
+        p_stmt = select(Payment).where(Payment.appointment_id.in_(appt_ids))
+        for p in (await db.execute(p_stmt)).scalars().all():
+            payments_by_appt[p.appointment_id].append(p)
+
     invoices = []
     for appt, patient_name, doctor_name in rows:
-        # Items
-        i_stmt = select(InvoiceItem).where(InvoiceItem.appointment_id == appt.id)
-        items = (await db.execute(i_stmt)).scalars().all()
-        # Payments
-        p_stmt = select(Payment).where(Payment.appointment_id == appt.id)
-        payments = (await db.execute(p_stmt)).scalars().all()
-        # Money
-        money = await compute_money_for_appointment(db, appt.id)
+        items = items_by_appt.get(appt.id, [])
+        payments = payments_by_appt.get(appt.id, [])
+
+        total = {"IQD": 0.0, "USD": 0.0}
+        paid = {"IQD": 0.0, "USD": 0.0}
+        for it in items:
+            curr = it.currency if it.currency in ("IQD", "USD") else "IQD"
+            total[curr] += float(it.price)
+
+        for p in payments:
+            curr = p.currency if p.currency in ("IQD", "USD") else "IQD"
+            if p.kind == "payment":
+                paid[curr] += float(p.amount)
+            elif p.kind == "refund":
+                paid[curr] -= float(p.amount)
+
+        money = MoneySummary(
+            total=total,
+            paid=paid,
+            balance={
+                "IQD": total["IQD"] - paid["IQD"],
+                "USD": total["USD"] - paid["USD"],
+            },
+        )
 
         invoices.append(
             Invoice(

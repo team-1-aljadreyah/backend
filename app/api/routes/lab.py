@@ -36,11 +36,16 @@ async def save_result(
         note = form.get("note", "")
 
         file_bytes = await uploaded_file.read()
-        saved_file_name = f"{order_id}_{uploaded_file.filename}"
+        import re
+        import os
+        raw_name = os.path.basename(uploaded_file.filename or "file.dat")
+        clean_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", raw_name)
+        saved_file_name = f"{order_id}_{clean_name}"
         storage_url = await supabase_storage.upload_file(
             saved_file_name,
             file_bytes,
             uploaded_file.content_type or "application/octet-stream",
+            bucket="lab-results",
         )
 
         result_data = {

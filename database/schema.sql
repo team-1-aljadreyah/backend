@@ -413,7 +413,7 @@ CREATE TABLE IF NOT EXISTS services (
     name VARCHAR(128) NOT NULL,
     name_ar VARCHAR(128) NOT NULL,
     kind VARCHAR(16) NOT NULL,
-    price NUMERIC(12, 2) NOT NULL CHECK (price >= 0),
+    price NUMERIC(12, 2) NOT NULL CHECK (price >= 0 OR kind = 'discount'),
     currency VARCHAR(8) NOT NULL DEFAULT 'IQD',
     template JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -433,7 +433,7 @@ CREATE TABLE IF NOT EXISTS invoice_items (
     label VARCHAR(128) NOT NULL,
     label_ar VARCHAR(128) NOT NULL,
     kind VARCHAR(32) NOT NULL,
-    price NUMERIC(12, 2) NOT NULL CHECK (price >= 0),
+    price NUMERIC(12, 2) NOT NULL CHECK (price >= 0 OR kind = 'discount'),
     currency VARCHAR(8) NOT NULL DEFAULT 'IQD',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -552,7 +552,7 @@ CREATE TABLE IF NOT EXISTS clinic_settings (
     deposit_amount NUMERIC(12, 2) NOT NULL DEFAULT 10000 CHECK (deposit_amount >= 0),
     prescription_days INTEGER NOT NULL DEFAULT 7 CHECK (prescription_days BETWEEN 1 AND 90),
     usd_rate NUMERIC(10, 2) NOT NULL DEFAULT 1310 CHECK (usd_rate > 0),
-    welfare_discount_percent INTEGER NOT NULL DEFAULT 25 CHECK (welfare_discount_percent BETWEEN 0 AND 100),
+    welfare_discount_percent NUMERIC(5, 2) NOT NULL DEFAULT 25.0 CHECK (welfare_discount_percent BETWEEN 0 AND 100),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1150,3 +1150,156 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
 );
 
 CREATE INDEX IF NOT EXISTS idx_idempotency_records_action ON idempotency_records(action);
+
+
+-- =============================================================================
+-- 4.23 Real-time Connection Tickets
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS realtime_connection_tickets (
+    id BIGSERIAL PRIMARY KEY,
+    token_hash VARCHAR(64) UNIQUE NOT NULL,
+    user_id BIGINT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_realtime_tickets_hash ON realtime_connection_tickets(token_hash);
+CREATE INDEX IF NOT EXISTS idx_realtime_tickets_user ON realtime_connection_tickets(user_id);
+CREATE INDEX IF NOT EXISTS idx_realtime_tickets_active ON realtime_connection_tickets(token_hash)
+    WHERE consumed_at IS NULL AND revoked_at IS NULL;
+
+-- =============================================================================
+-- 4.24 Transactional Outbox Events
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_uuid VARCHAR(36) UNIQUE NOT NULL,
+    event_type VARCHAR(100) NOT NULL,
+    channel VARCHAR(150) NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    correlation_id VARCHAR(64),
+    retry_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_events_channel ON outbox_events(channel);
+CREATE INDEX IF NOT EXISTS idx_outbox_events_type ON outbox_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_outbox_events_created ON outbox_events(created_at);
+
+-- Trigger to notify listening workers of new outbox events via PostgreSQL LISTEN/NOTIFY
+CREATE OR REPLACE FUNCTION notify_outbox_event()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify('realtime_events', NEW.id::text);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_outbox_event_notify ON outbox_events;
+CREATE TRIGGER trg_outbox_event_notify
+AFTER INSERT ON outbox_events
+FOR EACH ROW
+EXECUTE FUNCTION notify_outbox_event();
+
+-- =============================================================================
+-- 4.25 Distributed Rate Limit Entries
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS rate_limit_entries (
+    id BIGSERIAL PRIMARY KEY,
+    bucket_key VARCHAR(128) UNIQUE NOT NULL,
+    counter INTEGER NOT NULL DEFAULT 1,
+    window_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_key ON rate_limit_entries(bucket_key);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_expires ON rate_limit_entries(expires_at);
+
+-- =============================================================================
+-- SECTION 7.18+ : Additional Row Level Security (RLS) Policies
+-- =============================================================================
+ALTER TABLE patient_merges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE welfare_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE idempotency_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE password_reset_otps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE realtime_connection_tickets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE outbox_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rate_limit_entries ENABLE ROW LEVEL SECURITY;
+
+-- patient_merges RLS
+DROP POLICY IF EXISTS "Staff manage patient merges" ON patient_merges;
+CREATE POLICY "Staff manage patient merges" ON patient_merges FOR ALL TO authenticated
+    USING (is_staff());
+
+-- payment_sessions RLS
+DROP POLICY IF EXISTS "Users read own payment sessions" ON payment_sessions;
+CREATE POLICY "Users read own payment sessions" ON payment_sessions FOR SELECT TO authenticated
+    USING (
+        user_id = get_current_profile_id()
+        OR appointment_id IN (
+            SELECT a.id FROM appointments a
+            JOIN patients p ON a.patient_id = p.id
+            WHERE p.account_id = get_current_profile_id()
+        )
+        OR is_staff()
+    );
+
+DROP POLICY IF EXISTS "Users create own payment sessions" ON payment_sessions;
+CREATE POLICY "Users create own payment sessions" ON payment_sessions FOR INSERT TO authenticated
+    WITH CHECK (
+        user_id = get_current_profile_id()
+        OR is_staff()
+    );
+
+-- welfare_requests RLS
+DROP POLICY IF EXISTS "Patients read own welfare requests" ON welfare_requests;
+CREATE POLICY "Patients read own welfare requests" ON welfare_requests FOR SELECT TO authenticated
+    USING (
+        patient_id IN (SELECT id FROM patients WHERE account_id = get_current_profile_id())
+        OR is_staff()
+    );
+
+DROP POLICY IF EXISTS "Patients submit welfare requests" ON welfare_requests;
+CREATE POLICY "Patients submit welfare requests" ON welfare_requests FOR INSERT TO authenticated
+    WITH CHECK (
+        patient_id IN (SELECT id FROM patients WHERE account_id = get_current_profile_id())
+        OR is_staff()
+    );
+
+DROP POLICY IF EXISTS "Staff manage welfare requests" ON welfare_requests;
+CREATE POLICY "Staff manage welfare requests" ON welfare_requests FOR ALL TO authenticated
+    USING (get_current_user_role() IN ('reception', 'manager'));
+
+-- idempotency_records RLS
+DROP POLICY IF EXISTS "Users access own idempotency" ON idempotency_records;
+CREATE POLICY "Users access own idempotency" ON idempotency_records FOR ALL TO authenticated
+    USING (user_id = get_current_profile_id() OR is_staff());
+
+-- user_sessions RLS
+DROP POLICY IF EXISTS "Users manage own sessions" ON user_sessions;
+CREATE POLICY "Users manage own sessions" ON user_sessions FOR ALL TO authenticated
+    USING (user_id = get_current_profile_id() OR get_current_user_role() = 'manager');
+
+-- password_reset_otps RLS
+DROP POLICY IF EXISTS "Manager only direct access to OTPs" ON password_reset_otps;
+CREATE POLICY "Manager only direct access to OTPs" ON password_reset_otps FOR ALL TO authenticated
+    USING (get_current_user_role() = 'manager');
+
+-- realtime_connection_tickets RLS
+DROP POLICY IF EXISTS "Users manage own tickets" ON realtime_connection_tickets;
+CREATE POLICY "Users manage own tickets" ON realtime_connection_tickets FOR ALL TO authenticated
+    USING (user_id = get_current_profile_id() OR is_staff());
+
+-- outbox_events RLS
+DROP POLICY IF EXISTS "Staff read outbox events" ON outbox_events;
+CREATE POLICY "Staff read outbox events" ON outbox_events FOR SELECT TO authenticated
+    USING (is_staff());
+
+-- rate_limit_entries RLS
+DROP POLICY IF EXISTS "Manager only view rate limits" ON rate_limit_entries;
+CREATE POLICY "Manager only view rate limits" ON rate_limit_entries FOR ALL TO authenticated
+    USING (get_current_user_role() = 'manager');

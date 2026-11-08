@@ -38,7 +38,7 @@ If you discover a security vulnerability within this repository or the live clin
 
 This repository implements multi-layered defensive engineering controls:
 
-### A. Role-Based Access Control (RBAC) & Principle of Least Privilege
+### A. Role-Based Access Control (RBAC) & Least Privilege
 The system enforces 7 distinct user roles with strict separation of duties:
 - `patient`: Access to personal medical file, upcoming bookings, and family members.
 - `reception`: Patient check-in, walk-in creation, duplicate checking, and clinic fee collection.
@@ -48,24 +48,36 @@ The system enforces 7 distinct user roles with strict separation of duties:
 - `accountant`: Cash closings, payment verification, and daily ledger auditing.
 - `manager`: System-wide analytics, staff management, patient merging, and clinic configuration.
 
-### B. Authentication & Session Security
-- **Passwords**: Hashed with PBKDF2-HMAC-SHA256 (100,000 rounds) and random salt.
-- **Tokens**: Short-lived JWT access tokens signed with HS256 combined with secure refresh token rotation.
-- **Normalization**: Phone numbers are normalized into canonical Iraqi local format (`07XXXXXXXXX`) to eliminate credential collision.
+### B. Patient Privacy & Medical File Access Restrictions
+1. **Reception Medical File Block:** `GET /patients/{id}/file` explicitly strips visits, diagnoses, prescriptions, lab tests, and medical alerts when requested by `reception`. Reception receives only demographic records.
+2. **Doctor Appointment Access Restriction:** Doctors are strictly forbidden from opening medical files of patients who have not had a booked, arrived, or completed appointment with them.
+3. **Audit Logging:** Every file opening, export, and record view is permanently logged in `audit_logs` with actor ID, timestamp, and patient identifier.
+4. **Deleted Account Retention:** When a patient profile is deleted, their underlying medical file remains permanently intact for medical legal compliance.
 
-### C. Concurrency, Race Condition & Idempotency Controls
-- **Exclusion Constraints**: Database-level PostgreSQL GiST exclusion constraint (`exclude_overlapping_doctor_appointments`) prevents double-booking across all branches and active statuses.
-- **Transaction Serialization**: Row-level locking (`SELECT ... FOR UPDATE`) prevents concurrent booking races and duplicate patient merges.
-- **Idempotency Keys**: Supported via `Idempotency-Key` or `X-Idempotency-Key` headers with canonical SHA-256 payload hashing to prevent double-charges and replay attacks.
+### C. Authenticated & Signed Token Medical File Access
+- Medical documents (lab attachments, social welfare cards) are protected behind `/storage/v1/object/authenticated/{bucket}/{filename}` and `/files/{bucket}/{filename}`.
+- Unauthenticated requests are rejected with `401 Unauthorized`.
+- Path traversal sequences (`../`, `..\\`) are rejected with `400 Bad Request`.
+- To allow standard HTML `<img>` elements in frontend portals without exposing authorization tokens in browser headers, short-lived signed tokens (`?token=<signed_token>`) are generated using HMAC/JWT.
+- Tokens verify the caller's identity against the specific bucket and filename. Cross-patient file access is strictly blocked (`403 Forbidden`).
 
-### D. Financial Auditability & Data Protection
-- **Non-Destructive Accounting**: Financial records (`payments`, `expenses`) cannot be hard-deleted from the database. Adjustments require explicit reversal or voiding transactions accompanied by mandatory audit justifications.
-- **Audit Logging**: Sensitive system operations (`patient.merge`, `file.open`, `appointment.cancel`, `prescription.dispense`) are logged into an immutable `audit_logs` table.
+### D. Password Hashing & Migration
+- Passwords are encrypted using **Argon2id** (`m=65536, t=3, p=4`).
+- Transparent verification for legacy Bcrypt and PBKDF2 hashes is provided with automated upgrading to Argon2id upon successful authentication.
+- Plaintext password fallbacks and universal debug bypasses are strictly prohibited.
 
----
+### E. Distributed Database Rate Limiting (No Redis)
+- Sensitive endpoints (`/auth/login`, `/auth/register`, `/auth/password/forgot`) are protected against brute-force attacks via `rate_limit_entries` in PostgreSQL.
+- Rate limit buckets are keyed by SHA-256 hashes of client IP or phone numbers.
+- Atomic row locking prevents race conditions across distributed Uvicorn workers.
 
-## 4. Responsible Disclosure Guidelines
+### F. Multi-Worker WebSocket Security
+- Real-time WebSocket connections (`/ws`) require single-use connection tickets (`POST /realtime/ticket`).
+- Tickets are cryptographically hashed and stored in PostgreSQL (`realtime_connection_tickets`) with a 60-second expiration.
+- Atomic SQL updates (`UPDATE ... RETURNING`) guarantee that tickets can only be consumed once across any number of workers.
 
-- Do not attempt to access, modify, or download real patient medical records during vulnerability assessments.
-- Avoid Denial of Service (DoS) or Resource Exhaustion attacks against production infrastructure.
-- Provide sufficient time for the maintenance team to deploy patches before disclosing any findings publicly.
+### G. Qi Card Sandbox Payment Gateway Security
+- All integration tests and local runs use the official Qi Card Sandbox (`https://uat-sandbox-3ds-api.qi.iq/api/v1`).
+- HTTP Basic Auth with `X-Terminal-Id` header.
+- Strict `Decimal` arithmetic for all financial operations. Overpayments and zero-balance charges are refused.
+- Webhooks verify RSA-SHA256 signatures over canonical string `paymentId|amount.000|currency|creationDate|status` with authoritative server-to-server reconciliation via `GET /payment/{id}/status`.

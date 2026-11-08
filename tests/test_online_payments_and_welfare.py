@@ -16,8 +16,8 @@ class TestOnlinePaymentsAndWelfare(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
 
     async def test_welfare_submission_review_and_discount(self):
-        # 1. Submit welfare card photo and number
-        fake_photo = io.BytesIO(b"fake_welfare_card_image_bytes")
+        # 1. Submit welfare card photo and number with valid JPEG header
+        fake_photo = io.BytesIO(b"\xff\xd8\xff\xe0" + b"\x00" * 50)
         files = {"photo": ("card.jpg", fake_photo, "image/jpeg")}
         data = {"card_number": "WELFARE-12345"}
 
@@ -60,13 +60,21 @@ class TestOnlinePaymentsAndWelfare(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(len(my_welfare_res.json()["data"]) >= 1)
 
     async def test_online_payment_session_and_settlement(self):
-        # Book an appointment
-        book_date = (date.today() + timedelta(days=5)).isoformat()
-        slots_res = await self.client.get(f"/doctors/1/slots?date={book_date}&kind=new", headers=self.patient_headers)
-        self.assertEqual(slots_res.status_code, 200)
-        avail = [s for s in slots_res.json()["data"] if s["available"]]
-        self.assertTrue(len(avail) > 0)
-        slot_time = avail[0]["time"]
+        # Book an appointment on the next available working day
+        book_date = None
+        slot_time = None
+        for day_offset in range(1, 10):
+            cand_date = (date.today() + timedelta(days=day_offset)).isoformat()
+            slots_res = await self.client.get(f"/doctors/1/slots?date={cand_date}&kind=new", headers=self.patient_headers)
+            if slots_res.status_code == 200:
+                avail = [s for s in slots_res.json()["data"] if s["available"]]
+                if avail:
+                    book_date = cand_date
+                    slot_time = avail[0]["time"]
+                    break
+
+        self.assertIsNotNone(book_date, "Must find an available slot for doctor 1")
+        self.assertIsNotNone(slot_time, "Must find an available slot time")
 
         book_payload = {
             "patient_id": 1,

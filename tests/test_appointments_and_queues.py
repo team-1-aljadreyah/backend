@@ -73,7 +73,7 @@ class TestAppointmentsAndQueues(unittest.IsolatedAsyncioTestCase):
 
         # Walk-in registration
         walkin_payload = {
-            "name": "Walkin Patient",
+            "name": "Walkin Patient One",
             "phone": "07799998888",
             "doctor_id": 1,
             "emergency": True,
@@ -87,7 +87,7 @@ class TestAppointmentsAndQueues(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(q_res.status_code, 200)
         queue = q_res.json()["data"]
         # Emergency walk-in should be at or near the front of waiting queue
-        self.assertTrue(any(a["patient_name"] == "Walkin Patient" and a["emergency"] for a in queue))
+        self.assertTrue(any(a["patient_name"] == "Walkin Patient One" and a["emergency"] for a in queue))
 
     async def test_booking_rules_endpoint(self):
         res = await self.client.get("/patients/1/booking-rules", headers=self.patient_headers)

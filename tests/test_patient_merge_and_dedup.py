@@ -60,7 +60,7 @@ class TestPatientMergeAndDedup(unittest.IsolatedAsyncioTestCase):
     async def test_family_member_registration_shared_phone(self):
         """Family members sharing the same phone number can be registered without conflict."""
         add_child_req = {
-            "name": "يوسف محمد",
+            "name": "يوسف محمد علي",
             "relation": "child",
             "phone": "07800000005",  # Shared phone
             "birth_date": "2018-01-01",
@@ -72,7 +72,7 @@ class TestPatientMergeAndDedup(unittest.IsolatedAsyncioTestCase):
         fam_res = await self.client.get("/me/family", headers=self.patient_headers)
         self.assertEqual(fam_res.status_code, 200)
         names = [f["name"] for f in fam_res.json()["data"]]
-        self.assertIn("يوسف محمد", names)
+        self.assertIn("يوسف محمد علي", names)
 
     async def test_patient_merge_execution_and_transfer(self):
         """Test complete patient merge: transferring appointments, visits, vitals, alerts."""

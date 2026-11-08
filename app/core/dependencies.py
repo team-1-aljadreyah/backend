@@ -21,7 +21,7 @@ async def get_current_user_optional(
 
     token = auth.credentials
     payload = decode_token(token)
-    if not payload:
+    if not payload or payload.get("type") != "access":
         return None
 
     user_id_val = payload.get("sub") or payload.get("user_id")

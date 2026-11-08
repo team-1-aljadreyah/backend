@@ -10,6 +10,7 @@ from app.schemas.lab import LabOrderSchema, TestResult, ResultEdit
 from app.schemas.service import ServiceSchema
 from app.services.audit_service import log_audit
 from app.services.notification_service import notify_patient, notify_user
+from app.services.realtime_service import record_outbox_event
 
 
 def check_is_abnormal(result: Optional[Dict[str, Any]]) -> bool:
@@ -135,6 +136,25 @@ async def confirm_lab_result(db: AsyncSession, order_id: int, user: Profile):
         )
 
     await log_audit(db, user, "lab.confirm", patient.name)
+    record_outbox_event(
+        db=db,
+        channel=f"doctor:{order.doctor_id}",
+        event_type="lab.result_confirmed",
+        payload={
+            "order_id": order.id,
+            "patient_id": order.patient_id,
+            "test_name": service.name_ar,
+        },
+    )
+    record_outbox_event(
+        db=db,
+        channel="staff:lab",
+        event_type="lab.result_confirmed",
+        payload={
+            "order_id": order.id,
+            "patient_id": order.patient_id,
+        },
+    )
     await db.commit()
 
 

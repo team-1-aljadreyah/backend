@@ -1,5 +1,6 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.connection import get_db
 from app.core.dependencies import get_current_user, require_role
@@ -109,7 +110,7 @@ async def get_patient_file(
 async def get_patient_alerts(
     patient_id: int,
     db: AsyncSession = Depends(get_db),
-    user: Profile = Depends(require_role("doctor", "reception", "manager")),
+    user: Profile = Depends(require_role("doctor", "manager")),
 ):
     alerts = await clinical_service.get_patient_alerts(db, patient_id, user)
     return success_response(alerts.model_dump())
@@ -130,7 +131,7 @@ async def update_patient_alerts(
 async def get_patient_vitals(
     patient_id: int,
     db: AsyncSession = Depends(get_db),
-    user: Profile = Depends(require_role("doctor", "reception", "manager")),
+    user: Profile = Depends(require_role("doctor", "manager")),
 ):
     vitals = await clinical_service.get_patient_vitals(db, patient_id, user)
     return success_response([v.model_dump() for v in vitals])
@@ -140,7 +141,7 @@ async def get_patient_vitals(
 async def get_patient_history(
     patient_id: int,
     db: AsyncSession = Depends(get_db),
-    user: Profile = Depends(require_role("doctor", "reception", "manager")),
+    user: Profile = Depends(require_role("doctor", "manager")),
 ):
     history = await clinical_service.get_patient_history(db, patient_id, user)
     return success_response([h.model_dump() for h in history])
@@ -152,5 +153,16 @@ async def get_booking_rules(
     db: AsyncSession = Depends(get_db),
     user: Profile = Depends(get_current_user),
 ):
+    if user.role == "patient":
+        from app.core.exceptions import ForbiddenException
+        from app.database.models.patient import Patient
+        p_stmt = select(Patient).where(Patient.id == patient_id)
+        p = (await db.execute(p_stmt)).scalar_one_or_none()
+        if not p or p.account_id != user.id:
+            raise ForbiddenException(message="You can only view your own booking rules", code="forbidden")
+    elif user.role not in ("reception", "manager", "doctor"):
+        from app.core.exceptions import ForbiddenException
+        raise ForbiddenException(message="Access denied", code="forbidden")
+
     rules = await appointment_service.get_patient_booking_rules(db, patient_id)
     return success_response(rules.model_dump())

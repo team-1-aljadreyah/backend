@@ -9,7 +9,7 @@ from app.core.exceptions import (
     ConflictException,
     UnprocessableEntityException,
 )
-from app.core.security import normalize_phone_local, normalize_patient_name
+from app.core.security import normalize_phone_local, normalize_patient_name, validate_three_part_name
 from app.database.models.profile import Profile, Doctor
 from app.database.models.patient import Patient, PatientMerge, AppointmentVitals, WelfareRequest
 from app.database.models.appointment import Appointment
@@ -134,6 +134,7 @@ async def get_my_family(db: AsyncSession, current_user: Profile) -> List[FamilyM
 
 
 async def add_family_member(db: AsyncSession, current_user: Profile, req: FamilyInput):
+    validate_three_part_name(req.name)
     b_date = date.fromisoformat(req.birth_date) if req.birth_date else None
     norm_name = normalize_patient_name(req.name)
     raw_phone = req.phone or current_user.phone
@@ -176,6 +177,7 @@ async def add_family_member(db: AsyncSession, current_user: Profile, req: Family
 
 
 async def update_family_member(db: AsyncSession, current_user: Profile, member_id: int, req: FamilyInput):
+    validate_three_part_name(req.name)
     stmt = select(Patient).where(Patient.id == member_id, Patient.account_id == current_user.id)
     res = await db.execute(stmt)
     member = res.scalar_one_or_none()
@@ -276,8 +278,31 @@ async def get_patient_file(db: AsyncSession, patient_id: int, current_user: Prof
     patient, was_redirected = await resolve_active_patient(db, patient_id)
     target_id = patient.id
 
-    await log_audit(db, current_user, "file.open", f"{patient.name} (ID #{target_id})")
+    # Doctors: a doctor can open only the files of patients who have or had an appointment with them
+    if current_user.role == "doctor":
+        if not current_user.doctor_id:
+            raise ForbiddenException(message="Doctor profile missing doctor_id", code="forbidden")
+        doc_stmt = select(func.count(Appointment.id)).where(
+            Appointment.patient_id == target_id,
+            Appointment.doctor_id == current_user.doctor_id,
+        )
+        has_appt = (await db.execute(doc_stmt)).scalar() or 0
+        if has_appt == 0:
+            raise ForbiddenException(
+                message="Doctor can only open the files of patients who have or had an appointment with them",
+                code="forbidden",
+            )
+
+    # Log file openings: every time someone opens a medical file, record who and when
+    await log_audit(
+        db,
+        current_user,
+        "file.open",
+        f"{patient.name} (Patient #{target_id}) - Opened by {current_user.name} ({current_user.role})",
+    )
     await db.commit()
+
+    is_reception = (current_user.role == "reception")
 
     # Query family
     family_members = []
@@ -295,7 +320,7 @@ async def get_patient_file(db: AsyncSession, patient_id: int, current_user: Prof
                 relation=m.relation,
                 birth_date=str(m.birth_date) if m.birth_date else None,
                 phone=m.phone or None,
-                alerts=build_alerts(m),
+                alerts=MedicalAlerts(allergies=[], conditions=[], blood_type=None) if is_reception else build_alerts(m),
             )
             for m in f_res.scalars().all()
         ]
@@ -334,51 +359,52 @@ async def get_patient_file(db: AsyncSession, patient_id: int, current_user: Prof
             )
         )
 
-    # Query visits
-    v_stmt = select(Visit, Doctor.name_ar).join(Doctor, Visit.doctor_id == Doctor.id).where(
-        Visit.patient_id == target_id
-    ).order_by(Visit.created_at.desc())
-    v_res = await db.execute(v_stmt)
-    visit_rows = v_res.all()
-
+    # Query visits: Blocked for reception (only doctors and manager get full file)
     file_visits = []
-    for v, doc_name in visit_rows:
-        t_stmt = select(LabOrder, Service).join(Service, LabOrder.service_id == Service.id).where(
-            LabOrder.visit_id == v.id
-        )
-        t_res = await db.execute(t_stmt)
-        lab_orders = t_res.all()
+    if not is_reception:
+        v_stmt = select(Visit, Doctor.name_ar).join(Doctor, Visit.doctor_id == Doctor.id).where(
+            Visit.patient_id == target_id
+        ).order_by(Visit.created_at.desc())
+        v_res = await db.execute(v_stmt)
+        visit_rows = v_res.all()
 
-        visit_tests = [
-            VisitTest(
-                id=order.id,
-                test=Service(
-                    id=svc.id,
-                    name=svc.name,
-                    name_ar=svc.name_ar,
-                    kind=svc.kind,
-                    price=float(svc.price),
-                    currency=svc.currency,
-                    template=svc.template,
-                ),
-                status=order.status,
-                result=order.result if order.status == "confirmed" else None,
+        for v, doc_name in visit_rows:
+            t_stmt = select(LabOrder, Service).join(Service, LabOrder.service_id == Service.id).where(
+                LabOrder.visit_id == v.id
             )
-            for order, svc in lab_orders
-        ]
+            t_res = await db.execute(t_stmt)
+            lab_orders = t_res.all()
 
-        medicines = [Medicine(**m) for m in (v.medicines or [])]
-        file_visits.append(
-            PatientFileVisit(
-                id=v.id,
-                created_at=v.created_at.isoformat(),
-                doctor_name=doc_name,
-                diagnosis=v.diagnosis,
-                medicines=medicines,
-                dispensed=v.dispensed,
-                tests=visit_tests,
+            visit_tests = [
+                VisitTest(
+                    id=order.id,
+                    test=Service(
+                        id=svc.id,
+                        name=svc.name,
+                        name_ar=svc.name_ar,
+                        kind=svc.kind,
+                        price=float(svc.price),
+                        currency=svc.currency,
+                        template=svc.template,
+                    ),
+                    status=order.status,
+                    result=order.result if order.status == "confirmed" else None,
+                )
+                for order, svc in lab_orders
+            ]
+
+            medicines = [Medicine(**m) for m in (v.medicines or [])]
+            file_visits.append(
+                PatientFileVisit(
+                    id=v.id,
+                    created_at=v.created_at.isoformat(),
+                    doctor_name=doc_name,
+                    diagnosis=v.diagnosis,
+                    medicines=medicines,
+                    dispensed=v.dispensed,
+                    tests=visit_tests,
+                )
             )
-        )
 
     # Query payments
     appt_ids = [a.id for a, _ in appt_rows]
@@ -432,14 +458,19 @@ async def get_patient_file(db: AsyncSession, patient_id: int, current_user: Prof
     latest_w = (await db.execute(stmt_w)).scalars().first()
     welfare_schema = _welfare_to_schema(latest_w) if latest_w else None
 
-    # Payment log
-    from app.services.payment_service import get_patient_payment_history
-    history = await get_patient_payment_history(db, current_user, limit=200, offset=0, patient_id=target_id)
-    payment_log = [PaymentLogEntry(**item) for item in history.get("items", [])]
+    # Payment log (only for financial / front-desk staff, optional for doctors)
+    payment_log = []
+    if current_user.role in ("manager", "accountant", "reception"):
+        try:
+            from app.services.payment_service import get_patient_payment_history
+            history = await get_patient_payment_history(db, current_user, limit=200, offset=0, patient_id=target_id)
+            payment_log = [PaymentLogEntry(**item) for item in history.get("items", [])]
+        except Exception:
+            payment_log = []
 
     return PatientFile(
         patient=summary,
-        alerts=build_alerts(patient),
+        alerts=MedicalAlerts(allergies=[], conditions=[], blood_type=None) if is_reception else build_alerts(patient),
         family=family_members,
         appointments=patient_appts,
         visits=file_visits,
