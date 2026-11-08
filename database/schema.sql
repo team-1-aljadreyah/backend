@@ -1218,6 +1218,41 @@ CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_key ON rate_limit_entries(buck
 CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_expires ON rate_limit_entries(expires_at);
 
 -- =============================================================================
+-- 4.26 User Sessions & Token Tracking
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) UNIQUE NOT NULL,
+    jti VARCHAR(64) UNIQUE NOT NULL,
+    device_info VARCHAR(256),
+    ip_address VARCHAR(64),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_sessions_token_hash ON user_sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_jti ON user_sessions(jti);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at);
+
+-- =============================================================================
+-- 4.27 Password Reset OTPs
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS password_reset_otps (
+    id BIGSERIAL PRIMARY KEY,
+    phone VARCHAR(32) UNIQUE NOT NULL,
+    otp_hash VARCHAR(128) NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    cooldown_until TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_otps_phone ON password_reset_otps(phone);
+
+-- =============================================================================
 -- SECTION 7.18+ : Additional Row Level Security (RLS) Policies
 -- =============================================================================
 ALTER TABLE patient_merges ENABLE ROW LEVEL SECURITY;
@@ -1283,23 +1318,39 @@ CREATE POLICY "Users access own idempotency" ON idempotency_records FOR ALL TO a
 DROP POLICY IF EXISTS "Users manage own sessions" ON user_sessions;
 CREATE POLICY "Users manage own sessions" ON user_sessions FOR ALL TO authenticated
     USING (user_id = get_current_profile_id() OR get_current_user_role() = 'manager');
+DROP POLICY IF EXISTS "Backend service manages user sessions" ON user_sessions;
+CREATE POLICY "Backend service manages user sessions" ON user_sessions FOR ALL
+    USING (true) WITH CHECK (true);
+REVOKE ALL ON TABLE user_sessions FROM public, anon;
 
 -- password_reset_otps RLS
 DROP POLICY IF EXISTS "Manager only direct access to OTPs" ON password_reset_otps;
 CREATE POLICY "Manager only direct access to OTPs" ON password_reset_otps FOR ALL TO authenticated
     USING (get_current_user_role() = 'manager');
+DROP POLICY IF EXISTS "Backend service manages OTPs" ON password_reset_otps;
+CREATE POLICY "Backend service manages OTPs" ON password_reset_otps FOR ALL
+    USING (true) WITH CHECK (true);
+REVOKE ALL ON TABLE password_reset_otps FROM public, anon;
 
 -- realtime_connection_tickets RLS
 DROP POLICY IF EXISTS "Users manage own tickets" ON realtime_connection_tickets;
-CREATE POLICY "Users manage own tickets" ON realtime_connection_tickets FOR ALL TO authenticated
-    USING (user_id = get_current_profile_id() OR is_staff());
+DROP POLICY IF EXISTS "Backend service manages tickets" ON realtime_connection_tickets;
+CREATE POLICY "Backend service manages tickets" ON realtime_connection_tickets FOR ALL
+    USING (true) WITH CHECK (true);
+REVOKE ALL ON TABLE realtime_connection_tickets FROM public, anon;
 
 -- outbox_events RLS
 DROP POLICY IF EXISTS "Staff read outbox events" ON outbox_events;
-CREATE POLICY "Staff read outbox events" ON outbox_events FOR SELECT TO authenticated
-    USING (is_staff());
+DROP POLICY IF EXISTS "Backend service manages outbox" ON outbox_events;
+CREATE POLICY "Backend service manages outbox" ON outbox_events FOR ALL
+    USING (true) WITH CHECK (true);
+REVOKE ALL ON TABLE outbox_events FROM public, anon;
 
 -- rate_limit_entries RLS
+-- Rate limiting is an internal backend infrastructure mechanism executed on unauthenticated
+-- and authenticated requests alike. Access is restricted to the backend application database role.
 DROP POLICY IF EXISTS "Manager only view rate limits" ON rate_limit_entries;
-CREATE POLICY "Manager only view rate limits" ON rate_limit_entries FOR ALL TO authenticated
-    USING (get_current_user_role() = 'manager');
+DROP POLICY IF EXISTS "Backend service manages rate limits" ON rate_limit_entries;
+CREATE POLICY "Backend service manages rate limits" ON rate_limit_entries FOR ALL
+    USING (true) WITH CHECK (true);
+REVOKE ALL ON TABLE rate_limit_entries FROM public, anon;

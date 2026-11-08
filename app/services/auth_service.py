@@ -3,8 +3,10 @@ import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 from sqlalchemy import select, update, delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
+from app.core.logging import logger
 from app.core.exceptions import (
     UnauthorizedException,
     ConflictException,
@@ -106,55 +108,101 @@ async def login(db: AsyncSession, req: LoginRequest) -> LoginResponse:
 async def register(db: AsyncSession, req: RegisterRequest) -> LoginResponse:
     validate_three_part_name(req.name)
     phone = normalize_phone_local(req.phone)
-    stmt = select(Profile).where(Profile.phone == phone)
-    res = await db.execute(stmt)
-    if res.scalar_one_or_none():
-        raise ConflictException(message="Phone number is already registered", code="phone_taken")
-
-    hashed_pw = get_password_hash(req.password)
-    user = Profile(
-        name=req.name.strip(),
-        phone=phone,
-        password_hash=hashed_pw,
-        role="patient",
-    )
-    db.add(user)
-    await db.flush()
-
-    # Create new isolated patient record (relation='self')
     norm_name = normalize_patient_name(req.name)
     norm_phone = normalize_phone_local(phone)
-    new_patient = Patient(
-        name=req.name.strip(),
-        phone=phone,
-        normalized_name=norm_name,
-        normalized_phone=norm_phone,
-        account_id=user.id,
-        relation="self",
-        allergies=[],
-        conditions=[],
+
+    # 1. Check if profile with this phone already exists
+    stmt_prof = select(Profile).where(Profile.phone == phone)
+    res_prof = await db.execute(stmt_prof)
+    if res_prof.scalar_one_or_none():
+        raise ConflictException(message="Phone number is already registered", code="phone_taken")
+
+    # 2. Check if active patient record with same normalized phone and name already exists
+    # If an existing walk-in matches: do not automatically claim or link it, do not delete it,
+    # and do not bypass the unique index. Return a controlled 409 Conflict requiring authorized staff review.
+    stmt_pat = select(Patient).where(
+        Patient.normalized_phone == norm_phone,
+        Patient.normalized_name == norm_name,
+        Patient.merged_into_patient_id.is_(None),
     )
-    db.add(new_patient)
+    res_pat = await db.execute(stmt_pat)
+    existing_patient = res_pat.scalar_one_or_none()
+    if existing_patient:
+        logger.warning(
+            f"Registration blocked: unlinked/active patient record already exists for phone [MASKED] and name [MASKED] (patient_id={existing_patient.id})"
+        )
+        raise ConflictException(
+            message="A patient record with this phone number and name already exists. Please visit reception to link your account.",
+            code="patient_record_exists",
+        )
 
-    # Note: If an unlinked walk-in record with this phone existed, it is NOT automatically claimed
-    # to protect existing medical records from unauthorized takeover. Staff dedup/merge review is required.
+    try:
+        hashed_pw = get_password_hash(req.password)
+        user = Profile(
+            name=req.name.strip(),
+            phone=phone,
+            password_hash=hashed_pw,
+            role="patient",
+        )
+        db.add(user)
+        await db.flush()
 
-    jti = secrets.token_hex(16)
-    access_token = create_access_token({"sub": str(user.id), "role": user.role})
-    refresh_token = create_refresh_token({"sub": str(user.id), "role": user.role}, jti=jti)
+        # Create new isolated patient record (relation='self')
+        new_patient = Patient(
+            name=req.name.strip(),
+            phone=phone,
+            normalized_name=norm_name,
+            normalized_phone=norm_phone,
+            account_id=user.id,
+            relation="self",
+            allergies=[],
+            conditions=[],
+        )
+        db.add(new_patient)
+        await db.flush()
 
-    token_hash = _hash_token(refresh_token)
-    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    session = UserSession(
-        user_id=user.id,
-        token_hash=token_hash,
-        jti=jti,
-        expires_at=expires_at,
-    )
-    db.add(session)
+        jti = secrets.token_hex(16)
+        access_token = create_access_token({"sub": str(user.id), "role": user.role})
+        refresh_token = create_refresh_token({"sub": str(user.id), "role": user.role}, jti=jti)
 
-    await log_audit(db, user, "account.register", user.name)
-    await db.commit()
+        token_hash = _hash_token(refresh_token)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        session = UserSession(
+            user_id=user.id,
+            token_hash=token_hash,
+            jti=jti,
+            expires_at=expires_at,
+        )
+        db.add(session)
+
+        await log_audit(db, user, "account.register", user.name)
+        await db.commit()
+
+    except IntegrityError as exc:
+        await db.rollback()
+        err_str = str(exc.orig if hasattr(exc, "orig") else exc).lower()
+        if "idx_unique_active_patient_phone_name" in err_str or ("patients" in err_str and "unique" in err_str):
+            logger.warning("Registration integrity conflict on idx_unique_active_patient_phone_name")
+            raise ConflictException(
+                message="A patient record with this phone number and name already exists. Please visit reception to link your account.",
+                code="patient_record_exists",
+            )
+        elif "profiles_phone_key" in err_str or ("profiles" in err_str and "phone" in err_str):
+            logger.warning("Registration integrity conflict on profile phone uniqueness")
+            raise ConflictException(
+                message="Phone number is already registered",
+                code="phone_taken",
+            )
+        else:
+            logger.error(f"Unexpected database integrity error during registration: {exc}", exc_info=True)
+            raise
+    except (ConflictException, UnprocessableEntityException):
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.error(f"Unhandled registration database error: {exc}", exc_info=True)
+        raise
 
     return LoginResponse(
         access_token=access_token,

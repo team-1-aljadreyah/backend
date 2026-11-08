@@ -26,44 +26,56 @@ async def check_rate_limit(
     """
     PostgreSQL-backed distributed rate limiter.
     Returns: (is_allowed: bool, remaining: int, retry_after_seconds: int)
+    Executes in a nested transaction (savepoint) to prevent table or permission
+    failures from aborting the caller's outer transaction.
     """
     key_material = f"{key_prefix}:{raw_identifier}".strip().lower()
     bucket_key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
     now = datetime.now(timezone.utc)
 
-    stmt = select(RateLimitEntry).where(RateLimitEntry.bucket_key == bucket_key).with_for_update()
-    result = await db.execute(stmt)
-    entry = result.scalar_one_or_none()
+    try:
+        async with db.begin_nested():
+            stmt = select(RateLimitEntry).where(RateLimitEntry.bucket_key == bucket_key).with_for_update()
+            result = await db.execute(stmt)
+            entry = result.scalar_one_or_none()
 
-    if entry is None:
-        expires_at = now + timedelta(seconds=window_seconds)
-        new_entry = RateLimitEntry(
-            bucket_key=bucket_key,
-            counter=1,
-            window_start=now,
-            expires_at=expires_at,
+            if entry is None:
+                expires_at = now + timedelta(seconds=window_seconds)
+                new_entry = RateLimitEntry(
+                    bucket_key=bucket_key,
+                    counter=1,
+                    window_start=now,
+                    expires_at=expires_at,
+                )
+                db.add(new_entry)
+                await db.flush()
+                return True, max_requests - 1, 0
+
+            # If window has expired, reset counter and window
+            if ensure_utc(entry.expires_at) <= now:
+                entry.counter = 1
+                entry.window_start = now
+                entry.expires_at = now + timedelta(seconds=window_seconds)
+                await db.flush()
+                return True, max_requests - 1, 0
+
+            # Window still active
+            if entry.counter >= max_requests:
+                retry_after = max(1, int((ensure_utc(entry.expires_at) - now).total_seconds()))
+                return False, 0, retry_after
+
+            entry.counter += 1
+            remaining = max(0, max_requests - entry.counter)
+            await db.flush()
+            return True, remaining, 0
+
+    except Exception as exc:
+        logger.error(
+            f"Rate limiter database execution failed for {key_prefix}:{raw_identifier}: {exc}",
+            exc_info=True,
         )
-        db.add(new_entry)
-        await db.flush()
-        return True, max_requests - 1, 0
-
-    # If window has expired, reset counter and window
-    if ensure_utc(entry.expires_at) <= now:
-        entry.counter = 1
-        entry.window_start = now
-        entry.expires_at = now + timedelta(seconds=window_seconds)
-        await db.flush()
-        return True, max_requests - 1, 0
-
-    # Window still active
-    if entry.counter >= max_requests:
-        retry_after = max(1, int((ensure_utc(entry.expires_at) - now).total_seconds()))
-        return False, 0, retry_after
-
-    entry.counter += 1
-    remaining = max(0, max_requests - entry.counter)
-    await db.flush()
-    return True, remaining, 0
+        # Fail open on table or permission failures so critical clinic services remain accessible
+        return True, max_requests, 0
 
 
 def get_client_ip(request: Request) -> str:

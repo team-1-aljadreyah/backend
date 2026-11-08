@@ -221,30 +221,54 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# CORS Configuration: Accept all origins worldwide while fully supporting credentials
-explicit_origins = [
+# Explicit production allowlist for CORS
+allowed_origins = [
     "https://alrahma.ama8.uk",
-    "https://alrahma.ama8.uk/",
-    "http://alrahma.ama8.uk",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://89.144.46.249",
-    "http://89.144.46.249:80",
-    "http://89.144.46.249:8000",
 ]
 configured_origins = settings.FRONTEND_ORIGINS
 if isinstance(configured_origins, list):
-    explicit_origins.extend([o for o in configured_origins if o != "*"])
+    for o in configured_origins:
+        o_clean = str(o).strip().rstrip("/")
+        if o_clean and o_clean != "*" and o_clean not in allowed_origins:
+            allowed_origins.append(o_clean)
+elif isinstance(configured_origins, str) and configured_origins.strip() != "*":
+    for o in configured_origins.split(","):
+        o_clean = o.strip().rstrip("/")
+        if o_clean and o_clean != "*" and o_clean not in allowed_origins:
+            allowed_origins.append(o_clean)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=explicit_origins,
-    allow_origin_regex=r"^https?://.*",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
+allowed_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+allowed_headers = [
+    "Authorization",
+    "Content-Type",
+    "Accept",
+    "Origin",
+    "User-Agent",
+    "X-Requested-With",
+    "Idempotency-Key",
+    "Accept-Language",
+    "X-Terminal-Id",
+]
+exposed_headers = ["Content-Length", "Content-Range", "Retry-After", "Idempotency-Key"]
+
+
+def _is_allowed_origin(origin: Optional[str]) -> bool:
+    if not origin:
+        return False
+    norm = origin.strip().rstrip("/")
+    return norm in allowed_origins
+
+
+def add_cors_headers(request: Request, response: JSONResponse) -> JSONResponse:
+    origin = request.headers.get("origin")
+    if origin and _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Global Exception Handlers Matching Axios Response Interceptor Envelope
@@ -252,7 +276,7 @@ app.add_middleware(
 
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
-    return JSONResponse(
+    resp = JSONResponse(
         status_code=exc.status_code,
         content={
             "success": False,
@@ -261,6 +285,7 @@ async def app_exception_handler(request: Request, exc: AppException):
             "errors": exc.errors or {},
         },
     )
+    return add_cors_headers(request, resp)
 
 
 @app.exception_handler(RequestValidationError)
@@ -269,7 +294,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     for err in exc.errors():
         loc = ".".join(str(x) for x in err.get("loc", []))
         errors[loc] = [err.get("msg")]
-    return JSONResponse(
+    resp = JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "success": False,
@@ -278,25 +303,29 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "errors": errors,
         },
     )
+    return add_cors_headers(request, resp)
 
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(
+    code = "rate_limited" if exc.status_code == 429 else f"HTTP_{exc.status_code}"
+    resp = JSONResponse(
         status_code=exc.status_code,
         content={
             "success": False,
             "message": str(exc.detail),
-            "code": f"HTTP_{exc.status_code}",
+            "code": code,
             "errors": {},
         },
+        headers=getattr(exc, "headers", None),
     )
+    return add_cors_headers(request, resp)
 
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled server error: {exc}", exc_info=True)
-    return JSONResponse(
+    resp = JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "success": False,
@@ -305,6 +334,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
             "errors": {},
         },
     )
+    return add_cors_headers(request, resp)
 
 
 # Register all API routers
@@ -420,3 +450,17 @@ async def get_secure_file(
     authorization: Optional[str] = Header(None),
 ):
     return await get_storage_file(bucket, filename, token, authorization)
+
+
+# Wrap complete application with CORSMiddleware at the ASGI level
+# after all routes and exception handlers have been registered
+api_app = app
+app = CORSMiddleware(
+    api_app,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=allowed_methods,
+    allow_headers=allowed_headers,
+    expose_headers=exposed_headers,
+    max_age=86400,
+)
